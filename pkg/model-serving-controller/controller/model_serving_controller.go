@@ -1185,11 +1185,6 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, mi *wor
 		return nil
 	}
 
-	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName, datastore.ServingGroupDeleting); err != nil {
-		klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", mi.Namespace, "servingGroup", servingGroupName)
-		return err
-	}
-
 	if err := c.gangManager.DeletePodGroup(ctx, mi, servingGroupName); err != nil {
 		return fmt.Errorf("failed to delete PodGroup for ServingGroup %s: %v", servingGroupName, err)
 	}
@@ -1217,11 +1212,17 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, mi *wor
 		}
 	}
 
+	// update ServingGroup status to Deleting after deleting pods and services
+	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), servingGroupName, datastore.ServingGroupDeleting); err != nil {
+		klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", mi.Namespace, "servingGroup", servingGroupName)
+		return err
+	}
+
 	if c.isServingGroupDeleted(mi, servingGroupName) {
 		klog.V(2).Infof("ServingGroup %s has been deleted", servingGroupName)
 		c.store.DeleteServingGroup(utils.GetNamespaceName(mi), servingGroupName)
 		// this is needed when a pod is deleted accidentally, and the ServingGroup is deleted completely
-		// and the controller has no chance supplement it.
+		// and the controller has no chance to supplement it.
 		c.enqueueModelServing(mi)
 	}
 	return nil
