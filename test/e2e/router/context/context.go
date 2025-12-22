@@ -14,16 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package context
 
 import (
-	"context"
+	stdcontext "context"
 	"fmt"
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
+	"github.com/volcano-sh/kthena/test/e2e/utils"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -46,7 +48,7 @@ type RouterTestContext struct {
 
 // NewRouterTestContext creates a new RouterTestContext
 func NewRouterTestContext(namespace string) (*RouterTestContext, error) {
-	config, err := GetKubeConfig()
+	config, err := utils.GetKubeConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
@@ -66,13 +68,41 @@ func NewRouterTestContext(namespace string) (*RouterTestContext, error) {
 	}, nil
 }
 
+// CreateTestNamespace creates the test namespace if it doesn't exist.
+func (c *RouterTestContext) CreateTestNamespace() error {
+	fmt.Printf("Creating test namespace: %s\n", c.Namespace)
+	ctx := stdcontext.Background()
+	ns := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: c.Namespace,
+		},
+	}
+	_, err := c.KubeClient.CoreV1().Namespaces().Create(ctx, ns, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create namespace %s: %w", c.Namespace, err)
+	}
+	return nil
+}
+
+// DeleteTestNamespace deletes the test namespace.
+func (c *RouterTestContext) DeleteTestNamespace() error {
+	fmt.Printf("Deleting test namespace: %s\n", c.Namespace)
+	ctx := stdcontext.Background()
+	err := c.KubeClient.CoreV1().Namespaces().Delete(ctx, c.Namespace, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete namespace %s: %w", c.Namespace, err)
+	}
+	return nil
+}
+
 // SetupCommonComponents deploys common components that will be used by all router test cases.
 func (c *RouterTestContext) SetupCommonComponents() error {
-	ctx := context.Background()
+	fmt.Printf("Setting up common components in namespace: %s\n", c.Namespace)
+	ctx := stdcontext.Background()
 
 	// Deploy LLM Mock DS1.5B Deployment
 	fmt.Println("Deploying LLM Mock DS1.5B Deployment...")
-	deployment1_5b := LoadYAMLFromFile[appsv1.Deployment]("../../../examples/kthena-router/LLM-Mock-ds1.5b.yaml")
+	deployment1_5b := utils.LoadYAMLFromFile[appsv1.Deployment]("../../../examples/kthena-router/LLM-Mock-ds1.5b.yaml")
 	_, err := c.KubeClient.AppsV1().Deployments(c.Namespace).Create(ctx, deployment1_5b, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create DS1.5B Deployment: %w", err)
@@ -80,7 +110,7 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 
 	// Deploy LLM Mock DS7B Deployment
 	fmt.Println("Deploying LLM Mock DS7B Deployment...")
-	deployment7b := LoadYAMLFromFile[appsv1.Deployment]("../../../examples/kthena-router/LLM-Mock-ds7b.yaml")
+	deployment7b := utils.LoadYAMLFromFile[appsv1.Deployment]("../../../examples/kthena-router/LLM-Mock-ds7b.yaml")
 	_, err = c.KubeClient.AppsV1().Deployments(c.Namespace).Create(ctx, deployment7b, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create DS7B Deployment: %w", err)
@@ -88,9 +118,9 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 
 	// Wait for deployments to be ready
 	fmt.Println("Waiting for deployments to be ready...")
-	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	timeoutCtx, cancel := stdcontext.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	err = wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+	err = wait.PollUntilContextTimeout(timeoutCtx, 5*time.Second, 5*time.Minute, true, func(ctx stdcontext.Context) (bool, error) {
 		deploy1_5b, err := c.KubeClient.AppsV1().Deployments(c.Namespace).Get(ctx, Deployment1_5bName, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
@@ -108,7 +138,7 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 
 	// Deploy ModelServer DS1.5B
 	fmt.Println("Deploying ModelServer DS1.5B...")
-	modelServer1_5b := LoadYAMLFromFile[networkingv1alpha1.ModelServer]("../../../examples/kthena-router/ModelServer-ds1.5b.yaml")
+	modelServer1_5b := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer]("../../../examples/kthena-router/ModelServer-ds1.5b.yaml")
 	_, err = c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Create(ctx, modelServer1_5b, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create ModelServer DS1.5B: %w", err)
@@ -116,7 +146,7 @@ func (c *RouterTestContext) SetupCommonComponents() error {
 
 	// Deploy ModelServer DS7B
 	fmt.Println("Deploying ModelServer DS7B...")
-	modelServer7b := LoadYAMLFromFile[networkingv1alpha1.ModelServer]("../../../examples/kthena-router/ModelServer-ds7b.yaml")
+	modelServer7b := utils.LoadYAMLFromFile[networkingv1alpha1.ModelServer]("../../../examples/kthena-router/ModelServer-ds7b.yaml")
 	_, err = c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Create(ctx, modelServer7b, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create ModelServer DS7B: %w", err)
@@ -132,8 +162,8 @@ func (c *RouterTestContext) CleanupCommonComponents() error {
 		return nil
 	}
 
-	ctx := context.Background()
-	fmt.Println("Cleaning up common components...")
+	ctx := stdcontext.Background()
+	fmt.Printf("Cleaning up common components in namespace: %s\n", c.Namespace)
 
 	// Delete ModelServers
 	_ = c.KthenaClient.NetworkingV1alpha1().ModelServers(c.Namespace).Delete(ctx, ModelServer1_5bName, metav1.DeleteOptions{})

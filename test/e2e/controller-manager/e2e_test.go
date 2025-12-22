@@ -18,11 +18,10 @@ package controller_manager
 
 import (
 	"context"
-	"testing"
-	"time"
-
 	"fmt"
 	"os"
+	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -26,6 +26,10 @@ import (
 	"time"
 )
 
+var (
+	pfCmd *exec.Cmd
+)
+
 // KthenaConfig holds the configuration for installing kthena
 type KthenaConfig struct {
 	Namespace                 string
@@ -117,14 +121,19 @@ func InstallKthena(cfg *KthenaConfig) error {
 	// Setup port-forward to router service if networking is enabled
 	if cfg.NetworkingEnabled {
 		fmt.Println("Setting up port-forward to router service...")
-		pfCmd := exec.Command("kubectl", "port-forward", "-n", cfg.Namespace, "--address", "127.0.0.1", "svc/kthena-router", "8080:80")
-		// We need to run this in background. In a real test framework, we'd manage this process.
-		// For simplicity, we just trigger it. In TestMain teardown, we'd need to kill it.
-		// But port-forward usually blocks. Let's start it in background and save PID.
+		pfCmd = exec.Command("kubectl", "port-forward", "-n", cfg.Namespace, "--address", "127.0.0.1", "svc/kthena-router", "8080:80")
+		if err := pfCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start port-forward: %v", err)
+		}
+
 		go func() {
-			_ = pfCmd.Run()
+			// Wait for the command to finish to avoid zombie processes.
+			// The error is expected if the process is killed during cleanup.
+			if err := pfCmd.Wait(); err != nil {
+				fmt.Printf("port-forward command exited: %v\n", err)
+			}
 		}()
-		// Wait a bit for port-forward
+		// Wait a bit for port-forward.
 		time.Sleep(2 * time.Second)
 	}
 
@@ -134,13 +143,20 @@ func InstallKthena(cfg *KthenaConfig) error {
 // UninstallKthena uninstalls kthena via helm
 func UninstallKthena(namespace string) error {
 	fmt.Printf("Uninstalling kthena from namespace %s\n", namespace)
+
+	// Kill the port-forward process if it was started
+	if pfCmd != nil && pfCmd.Process != nil {
+		fmt.Println("Stopping port-forward process...")
+		_ = pfCmd.Process.Kill()
+	}
+
 	cmd := exec.Command("helm", "uninstall", "kthena", "--namespace", namespace)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	// Ignore error if already uninstalled
 	_ = cmd.Run()
 
-	// Kill any leftover port-forward processes
+	// Kill any leftover port-forward processes as a fallback
 	_ = exec.Command("pkill", "-f", "kubectl port-forward.*svc/kthena-router").Run()
 
 	return nil

@@ -26,22 +26,22 @@ import (
 	"github.com/stretchr/testify/require"
 	networkingv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/networking/v1alpha1"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
+	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-const (
-	testNamespace = "default"
-)
-
 var (
-	testCtx         *utils.RouterTestContext
+	testCtx         *routercontext.RouterTestContext
+	testNamespace   string
 	kthenaNamespace string
 )
 
 // TestMain runs setup and cleanup for all tests in this package.
 func TestMain(m *testing.M) {
+	testNamespace = "kthena-e2e-gateway-" + utils.RandomString(5)
+
 	config := framework.NewDefaultConfig()
 	kthenaNamespace = config.Namespace
 	// Gateway API tests need networking and gateway API enabled
@@ -54,9 +54,16 @@ func TestMain(m *testing.M) {
 	}
 
 	var err error
-	testCtx, err = utils.NewRouterTestContext(testNamespace)
+	testCtx, err = routercontext.NewRouterTestContext(testNamespace)
 	if err != nil {
 		fmt.Printf("Failed to create router test context: %v\n", err)
+		_ = framework.UninstallKthena(config.Namespace)
+		os.Exit(1)
+	}
+
+	// Create test namespace
+	if err := testCtx.CreateTestNamespace(); err != nil {
+		fmt.Printf("Failed to create test namespace: %v\n", err)
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
@@ -64,6 +71,7 @@ func TestMain(m *testing.M) {
 	// Setup common components (LLM Mocks and ModelServers)
 	if err := testCtx.SetupCommonComponents(); err != nil {
 		fmt.Printf("Failed to setup common components: %v\n", err)
+		_ = testCtx.DeleteTestNamespace()
 		_ = framework.UninstallKthena(config.Namespace)
 		os.Exit(1)
 	}
@@ -74,6 +82,11 @@ func TestMain(m *testing.M) {
 	// Cleanup common components
 	if err := testCtx.CleanupCommonComponents(); err != nil {
 		fmt.Printf("Failed to cleanup common components: %v\n", err)
+	}
+
+	// Delete test namespace
+	if err := testCtx.DeleteTestNamespace(); err != nil {
+		fmt.Printf("Failed to delete test namespace: %v\n", err)
 	}
 
 	if err := framework.UninstallKthena(config.Namespace); err != nil {
@@ -105,7 +118,9 @@ func TestModelRouteBindingGateway(t *testing.T) {
 	// Register cleanup
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
-		_ = testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{})
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
 	})
 
 	// 2. Test accessing the model route
