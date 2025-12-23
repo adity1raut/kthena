@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package router
+package gateway_api
 
 import (
 	"context"
@@ -29,20 +29,24 @@ import (
 	routercontext "github.com/volcano-sh/kthena/test/e2e/router/context"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 var (
-	testCtx       *routercontext.RouterTestContext
-	testNamespace string
+	testCtx         *routercontext.RouterTestContext
+	testNamespace   string
+	kthenaNamespace string
 )
 
 // TestMain runs setup and cleanup for all tests in this package.
 func TestMain(m *testing.M) {
-	testNamespace = "kthena-e2e-router-" + utils.RandomString(5)
+	testNamespace = "kthena-e2e-gateway-" + utils.RandomString(5)
 
 	config := framework.NewDefaultConfig()
-	// Router tests need networking enabled
+	kthenaNamespace = config.Namespace
+	// Gateway API tests need networking and gateway API enabled
 	config.NetworkingEnabled = true
+	config.GatewayAPIEnabled = true
 
 	if err := framework.InstallKthena(config); err != nil {
 		fmt.Printf("Failed to install kthena: %v\n", err)
@@ -64,7 +68,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// Setup common components
+	// Setup common components (LLM Mocks and ModelServers)
 	if err := testCtx.SetupCommonComponents(); err != nil {
 		fmt.Printf("Failed to setup common components: %v\n", err)
 		_ = testCtx.DeleteTestNamespace()
@@ -92,31 +96,39 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// TestModelRouteSimple tests a simple ModelRoute deployment and access.
-func TestModelRouteSimple(t *testing.T) {
+// TestModelRouteBindingGateway tests a ModelRoute binding to a Gateway.
+func TestModelRouteBindingGateway(t *testing.T) {
 	ctx := context.Background()
 
-	// Deploy ModelRoute
-	t.Log("Deploying ModelRoute...")
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteSimple.yaml")
+	// 1. Deploy ModelRoute
+	t.Log("Deploying ModelRoute binding to Gateway...")
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRoute-binding-gateway.yaml")
 	modelRoute.Namespace = testNamespace
+
+	// Update the parentRef namespace to match the kthena installation namespace
+	ktNamespace := gatewayv1.Namespace(kthenaNamespace)
+	if len(modelRoute.Spec.ParentRefs) > 0 {
+		modelRoute.Spec.ParentRefs[0].Namespace = &ktNamespace
+	}
+
 	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
 	require.NoError(t, err, "Failed to create ModelRoute")
 	assert.NotNil(t, createdModelRoute)
 	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
 
-	// Register cleanup function to delete ModelRoute after test completes
+	// Register cleanup
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
 		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
 			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
 		}
 	})
 
-	// Test accessing the model route (with retry logic)
+	// 2. Test accessing the model route
+	// Note: We still use the default router URL because in E2E we port-forward to the router service,
+	// which handles both raw and Gateway API routes.
 	messages := []utils.ChatMessage{
-		utils.NewChatMessage("user", "Hello"),
+		utils.NewChatMessage("user", "Hello Gateway API"),
 	}
 	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }

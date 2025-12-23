@@ -97,8 +97,8 @@ test-e2e: ## Run the e2e tests. Expected an isolated environment using Kind.
 	}
 	@echo "Setting up Kind cluster for E2E tests..."
 	@./test/e2e/setup.sh
-	@echo "Running E2E tests..."
-	@KUBECONFIG=/tmp/kubeconfig-e2e go test $$(go list ./... | grep /test/e2e) -v -timeout=10m
+	@echo "Running E2E tests sequentially..."
+	@KUBECONFIG=/tmp/kubeconfig-e2e go test -p 1 $$(go list ./... | grep /test/e2e) -v -timeout=15m
 	@echo "E2E tests completed"
 
 .PHONY: test-e2e-cleanup
