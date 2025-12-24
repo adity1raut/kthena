@@ -120,3 +120,61 @@ func TestModelRouteSimple(t *testing.T) {
 	}
 	utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
 }
+
+
+func TestModelRouteMultiModels(t *testing.T) {
+	ctx := context.Background()
+
+	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteMultiModels.yaml")
+	modelRoute.Namespace = testNamespace
+	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelRoute")
+	assert.NotNil(t, createdModelRoute)
+	t.Logf("Created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
+		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+			t.Logf("Warning: Failed to delete ModelRoute %s/%s: %v", createdModelRoute.Namespace, createdModelRoute.Name, err)
+		}
+	})
+
+	messages := []utils.ChatMessage{
+		utils.NewChatMessage("user", "Hello"),
+	}
+
+	t.Run("PremiumHeaderRoutesTo7BModel", func(t *testing.T) {
+		headers := map[string]string{"user-type": "premium"}
+		resp := utils.CheckChatCompletionsWithHeaders(t, modelRoute.Spec.ModelName, messages, headers)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.NotEmpty(t, resp.Body)
+	})
+
+	t.Run("DefaultRequestsRouteTo1_5BModel", func(t *testing.T) {
+		resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.NotEmpty(t, resp.Body)
+	})
+
+	t.Run("HeaderMatchingRulePriority", func(t *testing.T) {
+		headers := map[string]string{"user-type": "premium"}
+		resp := utils.CheckChatCompletionsWithHeaders(t, modelRoute.Spec.ModelName, messages, headers)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.NotEmpty(t, resp.Body)
+	})
+
+	t.Run("DefaultBehaviorWhenNoRulesMatch", func(t *testing.T) {
+		headers := map[string]string{"user-type": "basic"}
+		resp := utils.CheckChatCompletionsWithHeaders(t, modelRoute.Spec.ModelName, messages, headers)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.NotEmpty(t, resp.Body)
+	})
+
+	t.Run("EmptyHeaderValueFallsToDefault", func(t *testing.T) {
+		headers := map[string]string{"user-type": ""}
+		resp := utils.CheckChatCompletionsWithHeaders(t, modelRoute.Spec.ModelName, messages, headers)
+		assert.Equal(t, 200, resp.StatusCode)
+		assert.NotEmpty(t, resp.Body)
+	})
+}

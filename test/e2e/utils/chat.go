@@ -103,7 +103,7 @@ func CheckChatCompletionsWithURL(t *testing.T, url string, modelName string, mes
 
 		// Read response body
 		responseBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close() // Close immediately after reading
+		resp.Body.Close() 
 		if err != nil {
 			if attempt < maxRetries-1 {
 				t.Logf("Attempt %d/%d failed to read response: %v, retrying in %v...", attempt+1, maxRetries, err, backoff)
@@ -165,5 +165,95 @@ func NewChatMessage(role, content string) ChatMessage {
 	return ChatMessage{
 		Role:    role,
 		Content: content,
+	}
+}
+
+func CheckChatCompletionsWithHeaders(t *testing.T, modelName string, messages []ChatMessage, headers map[string]string) *ChatCompletionsResponse {
+	return CheckChatCompletionsWithURLAndHeaders(t, DefaultRouterURL, modelName, messages, headers)
+}
+
+func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string) *ChatCompletionsResponse {
+	requestBody := ChatCompletionsRequest{
+		Model:    modelName,
+		Messages: messages,
+		Stream:   false,
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	require.NoError(t, err, "Failed to marshal request body")
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+
+	// Retry configuration
+	maxRetries := 10
+	initialBackoff := 1 * time.Second
+	maxBackoff := 10 * time.Second
+	backoff := initialBackoff
+
+	var resp *http.Response
+	var responseStr string
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+		require.NoError(t, err, "Failed to create HTTP request")
+		req.Header.Set("Content-Type", "application/json")
+
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+
+		resp, err = client.Do(req)
+		if err != nil {
+			if attempt < maxRetries-1 {
+				t.Logf("Attempt %d/%d failed: %v, retrying in %v...", attempt+1, maxRetries, err, backoff)
+				time.Sleep(backoff)
+				backoff = min(backoff*2, maxBackoff)
+				continue
+			}
+			require.NoError(t, err, "Failed to send HTTP request after retries")
+		}
+
+		// Read response body
+		responseBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			if attempt < maxRetries-1 {
+				t.Logf("Attempt %d/%d failed to read response: %v, retrying in %v...", attempt+1, maxRetries, err, backoff)
+				time.Sleep(backoff)
+				backoff = min(backoff*2, maxBackoff)
+				continue
+			}
+			require.NoError(t, err, "Failed to read response body after retries")
+		}
+
+		responseStr = string(responseBody)
+
+		// Check if response is successful
+		if resp.StatusCode == http.StatusOK && responseStr != "" && !containsError(responseStr) {
+			t.Logf("Chat response status: %d", resp.StatusCode)
+			t.Logf("Chat response: %s", responseStr)
+			break
+		}
+
+		if attempt < maxRetries-1 {
+			t.Logf("Attempt %d/%d returned status %d or error response, retrying in %v...", attempt+1, maxRetries, resp.StatusCode, backoff)
+			time.Sleep(backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		t.Logf("Chat response status: %d", resp.StatusCode)
+		t.Logf("Chat response: %s", responseStr)
+		assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
+		assert.NotEmpty(t, responseStr, "Chat response is empty")
+		assert.NotContains(t, responseStr, "error", "Chat response contains error")
+		break
+	}
+
+	return &ChatCompletionsResponse{
+		StatusCode: resp.StatusCode,
+		Body:       responseStr,
 	}
 }
