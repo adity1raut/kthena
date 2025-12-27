@@ -334,6 +334,12 @@ spec:
   selector:
     matchLabels:
       workload.serving.volcano.sh/model-name: demo
+  # Kthena Router natively supports Gateway Inference Extension and does not require the Endpoint Picker Extension.
+  # It's just a placeholder for API validation.
+  endpointPickerRef:
+    name: kthena-demo
+    port:
+      number: 8000
 EOF
 ```
 
