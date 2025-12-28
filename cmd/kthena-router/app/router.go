@@ -48,6 +48,9 @@ func NewRouter(store datastore.Store) *router.Router {
 func (s *Server) startRouter(ctx context.Context, router *router.Router, store datastore.Store) {
 	gin.SetMode(gin.ReleaseMode)
 
+	// Start debug server on localhost
+	s.startDebugServer(ctx, store)
+
 	// Gateway API features are optional
 	if s.EnableGatewayAPI {
 		// Create listener manager for dynamic Gateway listener management
@@ -83,8 +86,59 @@ func (s *Server) startRouter(ctx context.Context, router *router.Router, store d
 	}
 }
 
+// startDebugServer starts a separate debug server on localhost
+// This server only handles debug endpoints and is not accessible from outside
+func (s *Server) startDebugServer(ctx context.Context, store datastore.Store) {
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+
+	// Debug endpoints
+	debugHandler := debug.NewDebugHandler(store)
+	debugGroup := engine.Group("/debug/config_dump")
+	{
+		// List resources
+		debugGroup.GET("/modelroutes", debugHandler.ListModelRoutes)
+		debugGroup.GET("/modelservers", debugHandler.ListModelServers)
+		debugGroup.GET("/pods", debugHandler.ListPods)
+		debugGroup.GET("/gateways", debugHandler.ListGateways)
+		debugGroup.GET("/httproutes", debugHandler.ListHTTPRoutes)
+		debugGroup.GET("/inferencepools", debugHandler.ListInferencePools)
+
+		// Get specific resources
+		debugGroup.GET("/namespaces/:namespace/modelroutes/:name", debugHandler.GetModelRoute)
+		debugGroup.GET("/namespaces/:namespace/modelservers/:name", debugHandler.GetModelServer)
+		debugGroup.GET("/namespaces/:namespace/pods/:name", debugHandler.GetPod)
+		debugGroup.GET("/namespaces/:namespace/gateways/:name", debugHandler.GetGateway)
+		debugGroup.GET("/namespaces/:namespace/httproutes/:name", debugHandler.GetHTTPRoute)
+		debugGroup.GET("/namespaces/:namespace/inferencepools/:name", debugHandler.GetInferencePool)
+	}
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf("localhost:%d", s.DebugPort),
+		Handler: engine.Handler(),
+	}
+	go func() {
+		klog.Infof("Starting debug server on localhost:%d", s.DebugPort)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			klog.Fatalf("Debug server listen failed: %v", err)
+		}
+	}()
+
+	go func() {
+		<-ctx.Done()
+		// graceful shutdown
+		klog.Info("Shutting down debug HTTP server ...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			klog.Errorf("Debug server shutdown failed: %v", err)
+		}
+		klog.Info("Debug HTTP server exited")
+	}()
+}
+
 // startDefaultServer starts the default HTTP server on fixed port
-// This server handles healthz, readyz, metrics, debug endpoints, and /v1/*path
+// This server handles healthz, readyz, metrics, and /v1/*path
 func (s *Server) startDefaultServer(ctx context.Context, router *router.Router, store datastore.Store) {
 	engine := gin.New()
 	engine.Use(gin.LoggerWithWriter(gin.DefaultWriter, "/healthz", "/readyz", "/metrics"), gin.Recovery())
@@ -109,27 +163,6 @@ func (s *Server) startDefaultServer(ctx context.Context, router *router.Router, 
 
 	// Prometheus metrics endpoint
 	engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
-
-	// Debug endpoints
-	debugHandler := debug.NewDebugHandler(store)
-	debugGroup := engine.Group("/debug/config_dump")
-	{
-		// List resources
-		debugGroup.GET("/modelroutes", debugHandler.ListModelRoutes)
-		debugGroup.GET("/modelservers", debugHandler.ListModelServers)
-		debugGroup.GET("/pods", debugHandler.ListPods)
-		debugGroup.GET("/gateways", debugHandler.ListGateways)
-		debugGroup.GET("/httproutes", debugHandler.ListHTTPRoutes)
-		debugGroup.GET("/inferencepools", debugHandler.ListInferencePools)
-
-		// Get specific resources
-		debugGroup.GET("/namespaces/:namespace/modelroutes/:name", debugHandler.GetModelRoute)
-		debugGroup.GET("/namespaces/:namespace/modelservers/:name", debugHandler.GetModelServer)
-		debugGroup.GET("/namespaces/:namespace/pods/:name", debugHandler.GetPod)
-		debugGroup.GET("/namespaces/:namespace/gateways/:name", debugHandler.GetGateway)
-		debugGroup.GET("/namespaces/:namespace/httproutes/:name", debugHandler.GetHTTPRoute)
-		debugGroup.GET("/namespaces/:namespace/inferencepools/:name", debugHandler.GetInferencePool)
-	}
 
 	// Handle /v1/*path with middleware
 	v1Group := engine.Group("/v1")
@@ -255,7 +288,7 @@ func (lm *ListenerManager) findBestMatchingListener(port int32, hostname string)
 func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if strconv.Itoa(int(port)) == lm.server.Port {
-			// Handle management endpoints first (healthz, readyz, metrics, debug)
+			// Handle management endpoints first (healthz, readyz, metrics)
 			path := c.Request.URL.Path
 			if path == "/healthz" {
 				c.JSON(http.StatusOK, gin.H{
@@ -278,72 +311,6 @@ func (lm *ListenerManager) createPortHandler(port int32) gin.HandlerFunc {
 			if path == "/metrics" {
 				promhttp.Handler().ServeHTTP(c.Writer, c.Request)
 				return
-			}
-			if strings.HasPrefix(path, "/debug/config_dump") {
-				debugHandler := debug.NewDebugHandler(lm.store)
-				// Handle list endpoints
-				if path == "/debug/config_dump/modelroutes" {
-					debugHandler.ListModelRoutes(c)
-					return
-				}
-				if path == "/debug/config_dump/modelservers" {
-					debugHandler.ListModelServers(c)
-					return
-				}
-				if path == "/debug/config_dump/pods" {
-					debugHandler.ListPods(c)
-					return
-				}
-				if path == "/debug/config_dump/gateways" {
-					debugHandler.ListGateways(c)
-					return
-				}
-				if path == "/debug/config_dump/httproutes" {
-					debugHandler.ListHTTPRoutes(c)
-					return
-				}
-				if path == "/debug/config_dump/inferencepools" {
-					debugHandler.ListInferencePools(c)
-					return
-				}
-				// Handle parameterized debug routes
-				if strings.HasPrefix(path, "/debug/config_dump/namespaces/") {
-					parts := strings.Split(strings.TrimPrefix(path, "/debug/config_dump/namespaces/"), "/")
-					if len(parts) == 3 {
-						namespace := parts[0]
-						resourceType := parts[1]
-						name := parts[2]
-						// Set params for gin context
-						c.Params = []gin.Param{
-							{Key: "namespace", Value: namespace},
-							{Key: "name", Value: name},
-						}
-						if resourceType == "modelroutes" {
-							debugHandler.GetModelRoute(c)
-							return
-						}
-						if resourceType == "modelservers" {
-							debugHandler.GetModelServer(c)
-							return
-						}
-						if resourceType == "pods" {
-							debugHandler.GetPod(c)
-							return
-						}
-						if resourceType == "gateways" {
-							debugHandler.GetGateway(c)
-							return
-						}
-						if resourceType == "httproutes" {
-							debugHandler.GetHTTPRoute(c)
-							return
-						}
-						if resourceType == "inferencepools" {
-							debugHandler.GetInferencePool(c)
-							return
-						}
-					}
-				}
 			}
 		}
 

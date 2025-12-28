@@ -35,9 +35,10 @@ type Server struct {
 	Port                               string
 	EnableGatewayAPI                   bool
 	EnableGatewayAPIInferenceExtension bool
+	DebugPort                          int
 }
 
-func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool) *Server {
+func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI bool, enableGatewayAPIInferenceExtension bool, debugPort int) *Server {
 	return &Server{
 		store:                              nil,
 		EnableTLS:                          enableTLS,
@@ -46,6 +47,7 @@ func NewServer(port string, enableTLS bool, cert, key string, enableGatewayAPI b
 		Port:                               port,
 		EnableGatewayAPI:                   enableGatewayAPI,
 		EnableGatewayAPIInferenceExtension: enableGatewayAPIInferenceExtension,
+		DebugPort:                          debugPort,
 	}
 }
 
