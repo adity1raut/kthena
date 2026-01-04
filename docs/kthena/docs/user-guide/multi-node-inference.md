@@ -329,7 +329,7 @@ Kthena creates PodGroups based on the ModelServing. Among these, the important f
 
 ### MinRoleReplicas and PodGroup Mapping
 
-The `MinRoleReplicas` map is used to generate the PodGroup's `spec.minTaskMember` field. Each entry becomes a key-value pair where the key is `{roleName}-{index}` and the value is the number of pods per role replica (`1 + workerReplicas`). Only role replicas with index less than `minRoleReplicas` are included, allowing the gang to start before all replicas are ready.
+The `MinRoleReplicas` map is used to generate the PodGroup's `spec.minTaskMember` field. Each entry becomes a key-value pair where the key is `{roleName}-{index}` and the value is the number of pods per role replica (`1 + workerReplicas`). Only role replicas with an index less than the corresponding `minRoleReplicas` value for that role are included, allowing the gang to start before all replicas are ready.
 
 **Example:** In the `multi-node.yaml` example, the gang policy is defined as:
 
