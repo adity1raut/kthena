@@ -155,9 +155,11 @@ func TestModelBoosterValidation(t *testing.T) {
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
 
-	// Create an invalid ModelBooster (minReplicas > maxReplicas)
+	// Create an invalid ModelBooster (minReplicas > maxReplicas) with DryRun
 	invalidModel := createInvalidModel()
-	_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, invalidModel, metav1.CreateOptions{})
+	_, err = kthenaClient.WorkloadV1alpha1().ModelBoosters(testNamespace).Create(ctx, invalidModel, metav1.CreateOptions{
+		DryRun: []string{"All"},
+	})
 	require.Error(t, err, "Expected validation error for invalid ModelBooster")
 	// Check that the error is a validation error (admission webhook rejection)
 	// Typically the error message contains "admission webhook" or "validation failed"
@@ -172,9 +174,11 @@ func TestAutoscalingPolicyValidation(t *testing.T) {
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
 
-	// Create an invalid AutoscalingPolicy (duplicate metric names)
+	// Create an invalid AutoscalingPolicy (duplicate metric names) with DryRun
 	invalidPolicy := createInvalidAutoscalingPolicy()
-	_, err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, invalidPolicy, metav1.CreateOptions{})
+	_, err = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, invalidPolicy, metav1.CreateOptions{
+		DryRun: []string{"All"},
+	})
 	require.Error(t, err, "Expected validation error for invalid AutoscalingPolicy")
 	t.Logf("Validation error (expected): %v", err)
 }
@@ -187,19 +191,21 @@ func TestAutoscalingPolicyMutation(t *testing.T) {
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
 
-	// Create an AutoscalingPolicy with empty behavior (should be defaulted)
+	// Create an AutoscalingPolicy with empty behavior (should be defaulted) with DryRun
 	policy := createAutoscalingPolicyWithEmptyBehavior()
-	created, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, policy, metav1.CreateOptions{})
+	created, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, policy, metav1.CreateOptions{
+		DryRun: []string{"All"},
+	})
 	require.NoError(t, err, "Failed to create AutoscalingPolicy")
 	assert.NotNil(t, created)
-	// Verify that behavior fields have been defaulted
+	// Verify that behavior fields have been defaulted (mutation happens even with DryRun)
 	assert.NotNil(t, created.Spec.Behavior.ScaleDown)
 	assert.NotNil(t, created.Spec.Behavior.ScaleUp)
 	// Check specific default values (based on mutator logic)
 	if created.Spec.Behavior.ScaleDown.StabilizationWindow != nil {
 		assert.Equal(t, 5*time.Minute, created.Spec.Behavior.ScaleDown.StabilizationWindow.Duration)
 	}
-	t.Logf("Created AutoscalingPolicy with defaults: %s/%s", created.Namespace, created.Name)
+	t.Logf("Created AutoscalingPolicy with defaults (DryRun): %s/%s", created.Namespace, created.Name)
 }
 
 // TestAutoscalingPolicyBindingValidation tests that the webhook validates AutoscalingPolicyBinding specs.
@@ -210,22 +216,22 @@ func TestAutoscalingPolicyBindingValidation(t *testing.T) {
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
 
-	// First create a valid AutoscalingPolicy to reference
+	// First create a valid AutoscalingPolicy to reference (with DryRun)
 	policy := createValidAutoscalingPolicy()
-	createdPolicy, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, policy, metav1.CreateOptions{})
+	createdPolicy, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, policy, metav1.CreateOptions{
+		DryRun: []string{"All"},
+	})
 	require.NoError(t, err, "Failed to create AutoscalingPolicy")
-	t.Logf("Created AutoscalingPolicy: %s/%s", createdPolicy.Namespace, createdPolicy.Name)
+	t.Logf("Created AutoscalingPolicy (DryRun): %s/%s", createdPolicy.Namespace, createdPolicy.Name)
 
-	// Create a valid binding referencing the policy
+	// Create a valid binding referencing the policy (with DryRun)
 	binding := createValidAutoscalingPolicyBinding(createdPolicy.Name)
-	createdBinding, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(testNamespace).Create(ctx, binding, metav1.CreateOptions{})
+	createdBinding, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(testNamespace).Create(ctx, binding, metav1.CreateOptions{
+		DryRun: []string{"All"},
+	})
 	require.NoError(t, err, "Failed to create AutoscalingPolicyBinding")
 	assert.NotNil(t, createdBinding)
-	t.Logf("Created AutoscalingPolicyBinding: %s/%s", createdBinding.Namespace, createdBinding.Name)
-
-	// Clean up (optional)
-	_ = kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(testNamespace).Delete(ctx, createdBinding.Name, metav1.DeleteOptions{})
-	_ = kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Delete(ctx, createdPolicy.Name, metav1.DeleteOptions{})
+	t.Logf("Created AutoscalingPolicyBinding (DryRun): %s/%s", createdBinding.Namespace, createdBinding.Name)
 }
 
 // TestModelServingValidation tests that the webhook rejects invalid ModelServing specs.
@@ -236,9 +242,11 @@ func TestModelServingValidation(t *testing.T) {
 	kthenaClient, err := clientset.NewForConfig(config)
 	require.NoError(t, err, "Failed to create kthena client")
 
-	// Create an invalid ModelServing (negative replicas)
+	// Create an invalid ModelServing (negative replicas) with DryRun
 	invalidServing := createInvalidModelServing()
-	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, invalidServing, metav1.CreateOptions{})
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, invalidServing, metav1.CreateOptions{
+		DryRun: []string{"All"},
+	})
 	require.Error(t, err, "Expected validation error for invalid ModelServing")
 	// Check that the error is a validation error (admission webhook rejection)
 	t.Logf("Validation error (expected): %v", err)
