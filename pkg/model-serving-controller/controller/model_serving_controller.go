@@ -359,30 +359,25 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 		}
 	}
 
-	if svc.GetLabels() == nil {
-		// This service is not created by ModelServing controller
-		return
-	}
-
-	labelKeys := map[string]string{
-		workloadv1alpha1.ModelServingNameLabelKey: "",
-		workloadv1alpha1.GroupNameLabelKey:        "",
-		workloadv1alpha1.RoleLabelKey:             "",
-		workloadv1alpha1.RoleIDKey:                "",
-	}
-
-	for k := range labelKeys {
-		if _, ok := svc.GetLabels()[k]; !ok {
-			// This service is not created by ModelServing controller
-			return
-		} else {
-			labelKeys[k] = svc.GetLabels()[k]
+	// Get the ModelServing name from the service owner reference
+	var modelServingName string
+	foundOwner := false
+	for _, ownerRef := range svc.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && ownerRef.Kind == "ModelServing" {
+			modelServingName = ownerRef.Name
+			foundOwner = true
+			break
 		}
 	}
 
-	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), labelKeys[workloadv1alpha1.ModelServingNameLabelKey])
+	if !foundOwner {
+		// This service is not owned by ModelServing controller
+		return
+	}
 
-	miKey := fmt.Sprintf("%s/%s", svc.GetNamespace(), labelKeys[workloadv1alpha1.ModelServingNameLabelKey])
+	klog.V(4).Infof("Service %s/%s deleted, enqueuing ModelServing %s for reconcile", svc.GetNamespace(), svc.GetName(), modelServingName)
+
+	miKey := fmt.Sprintf("%s/%s", svc.GetNamespace(), modelServingName)
 	c.workqueue.Add(miKey)
 }
 
@@ -436,10 +431,6 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
-	if err := c.managerHeadlessService(ctx, mi); err != nil {
-		return fmt.Errorf("cannot manage ModelServing: %v", err)
-	}
-
 	// only fields in roles can be modified in rolling updates.
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(mi)
@@ -454,6 +445,10 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 
 	if err := c.manageServingGroupRollingUpdate(ctx, mi, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup rollingUpdate: %v", err)
+	}
+
+	if err := c.managerHeadlessService(ctx, mi); err != nil {
+		return fmt.Errorf("cannot manage ModelServing: %v", err)
 	}
 
 	if err := c.UpdateModelServingStatus(mi, revision); err != nil {
@@ -1213,7 +1208,7 @@ func (c *ModelServingController) managerHeadlessService(ctx context.Context, mi 
 				if len(services) == 0 && role.WorkerTemplate != nil {
 					_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 					if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, mi, serviceSelector, sg.Name, role.Name, roleIndex); err != nil {
-						klog.Errorf("failed to recreate service for role %s in serving group %s: %v", roleObj.Name, sg.Name, err)
+						klog.Errorf("failed to create service for role %s in serving group %s: %v", roleObj.Name, sg.Name, err)
 					}
 				}
 			}
@@ -1249,17 +1244,17 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
 	}
 
-	serviceSelector := map[string]string{
-		workloadv1alpha1.GroupNameLabelKey: servingGroupName,
-		workloadv1alpha1.RoleLabelKey:      role.Name,
-		workloadv1alpha1.RoleIDKey:         utils.GenerateRoleID(role.Name, roleIndex),
-		workloadv1alpha1.EntryLabelKey:     utils.Entry,
-	}
-	if role.WorkerTemplate != nil {
-		if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, mi, serviceSelector, servingGroupName, role.Name, roleIndex); err != nil {
-			return fmt.Errorf("failed to create headless service: %v", err)
-		}
-	}
+	// serviceSelector := map[string]string{
+	// 	workloadv1alpha1.GroupNameLabelKey: servingGroupName,
+	// 	workloadv1alpha1.RoleLabelKey:      role.Name,
+	// 	workloadv1alpha1.RoleIDKey:         utils.GenerateRoleID(role.Name, roleIndex),
+	// 	workloadv1alpha1.EntryLabelKey:     utils.Entry,
+	// }
+	// if role.WorkerTemplate != nil {
+	// 	if err := utils.CreateHeadlessService(ctx, c.kubeClientSet, mi, serviceSelector, servingGroupName, role.Name, roleIndex); err != nil {
+	// 		return fmt.Errorf("failed to create headless service: %v", err)
+	// 	}
+	// }
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
 		workerPod := utils.GenerateWorkerPod(role, mi, entryPod, servingGroupName, roleIndex, i, revision)
