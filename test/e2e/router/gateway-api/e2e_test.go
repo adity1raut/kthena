@@ -231,11 +231,15 @@ func TestDuplicateModelName(t *testing.T) {
 
 	// 4. Setup port-forward for port 8081
 	t.Log("Setting up port-forward for port 8081...")
-	cleanup, err := utils.SetupPortForward(kthenaNamespace, "kthena-router", "8081", "8081")
+	pf, err := utils.SetupPortForward(kthenaNamespace, "kthena-router", "8081", "8081")
 	require.NoError(t, err, "Failed to setup port-forward for 8081")
 
 	// Register cleanup to kill port-forward
-	t.Cleanup(cleanup)
+	t.Cleanup(func() {
+		if pf != nil {
+			pf.Close()
+		}
+	})
 
 	// 5. Create second ModelRoute with same modelName but bound to custom Gateway
 	t.Log("Creating second ModelRoute with same modelName bound to custom Gateway...")

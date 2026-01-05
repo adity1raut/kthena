@@ -29,7 +29,7 @@ import (
 )
 
 var (
-	pfCleanup func()
+	pfForwarder utils.PortForwarder
 )
 
 // KthenaConfig holds the configuration for installing kthena
@@ -124,12 +124,12 @@ func InstallKthena(cfg *KthenaConfig) error {
 	if cfg.NetworkingEnabled {
 		fmt.Println("Setting up port-forward to router service...")
 		var err error
-		pfCleanup, err = utils.SetupPortForward(cfg.Namespace, "kthena-router", "8080", "80")
+		pfForwarder, err = utils.SetupPortForward(cfg.Namespace, "kthena-router", "8080", "80")
 		if err != nil {
 			return fmt.Errorf("failed to setup port-forward: %v", err)
 		}
 		// Note: SetupPortForward already waits for the port-forward to be ready.
-		// Cleanup is handled by UninstallKthena via the global pfCleanup.
+		// Cleanup is handled by UninstallKthena via the global pfForwarder.
 	}
 
 	return nil
@@ -140,9 +140,9 @@ func UninstallKthena(namespace string) error {
 	fmt.Printf("Uninstalling kthena from namespace %s\n", namespace)
 
 	// Kill the port-forward process if it was started
-	if pfCleanup != nil {
+	if pfForwarder != nil {
 		fmt.Println("Stopping port-forward process...")
-		pfCleanup()
+		pfForwarder.Close()
 	}
 
 	cmd := exec.Command("helm", "uninstall", "kthena", "--namespace", namespace)
