@@ -50,6 +50,7 @@ func main() {
 		webhookKey                         string
 		certSecretName                     string
 		serviceName                        string
+		debugPort                          int
 	)
 
 	klog.InitFlags(nil)
@@ -65,6 +66,7 @@ func main() {
 	pflag.StringVar(&webhookKey, "webhook-tls-private-key-file", "/etc/tls/tls.key", "Path to the webhook TLS private key file")
 	pflag.StringVar(&certSecretName, "cert-secret-name", "kthena-router-webhook-certs", "Name of the secret to store auto-generated webhook certificates")
 	pflag.StringVar(&serviceName, "webhook-service-name", "kthena-router-webhook", "Service name for the webhook server")
+	pflag.IntVar(&debugPort, "debug-port", 15000, "The port for the debug server (localhost only)")
 	defer klog.Flush()
 	pflag.Parse()
 
@@ -78,6 +80,10 @@ func main() {
 
 	if webhookPort <= 0 || webhookPort > 65535 {
 		klog.Fatalf("invalid webhook port: %d", webhookPort)
+	}
+
+	if debugPort <= 0 || debugPort > 65535 {
+		klog.Fatalf("invalid debug port: %d", debugPort)
 	}
 
 	pflag.CommandLine.VisitAll(func(f *pflag.Flag) {
@@ -101,7 +107,7 @@ func main() {
 		klog.Info("Webhook server is disabled")
 	}
 
-	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension).Run(ctx)
+	app.NewServer(routerPort, tlsCert != "" && tlsKey != "", tlsCert, tlsKey, enableGatewayAPI, enableGatewayAPIInferenceExtension, debugPort).Run(ctx)
 }
 
 // ensureWebhookCertificate generates a certificate secret if needed and returns the CA bundle.

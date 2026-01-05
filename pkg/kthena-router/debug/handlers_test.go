@@ -19,13 +19,17 @@ package debug
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"istio.io/istio/pkg/util/sets"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -406,4 +410,93 @@ func TestGetModelRoute(t *testing.T) {
 	assert.Equal(t, "llama2-7b", response.Spec.ModelName)
 
 	mockStore.AssertExpectations(t)
+}
+
+// TestDebugServerIntegration tests the debug server as a whole, including server startup and endpoint accessibility
+func TestDebugServerIntegration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Find an available port
+	listener, err := net.Listen("tcp", ":0")
+	require.NoError(t, err)
+	debugPort := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+
+	store := datastore.New()
+	handler := NewDebugHandler(store)
+
+	// Setup debug server routes (mimicking startDebugServer logic)
+	engine := gin.New()
+	engine.Use(gin.Recovery())
+	debugGroup := engine.Group("/debug/config_dump")
+	{
+		// List resources
+		debugGroup.GET("/modelroutes", handler.ListModelRoutes)
+		debugGroup.GET("/modelservers", handler.ListModelServers)
+		debugGroup.GET("/pods", handler.ListPods)
+		debugGroup.GET("/gateways", handler.ListGateways)
+		debugGroup.GET("/httproutes", handler.ListHTTPRoutes)
+		debugGroup.GET("/inferencepools", handler.ListInferencePools)
+
+		// Get specific resources
+		debugGroup.GET("/namespaces/:namespace/modelroutes/:name", handler.GetModelRoute)
+		debugGroup.GET("/namespaces/:namespace/modelservers/:name", handler.GetModelServer)
+		debugGroup.GET("/namespaces/:namespace/pods/:name", handler.GetPod)
+		debugGroup.GET("/namespaces/:namespace/gateways/:name", handler.GetGateway)
+		debugGroup.GET("/namespaces/:namespace/httproutes/:name", handler.GetHTTPRoute)
+		debugGroup.GET("/namespaces/:namespace/inferencepools/:name", handler.GetInferencePool)
+	}
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf("localhost:%d", debugPort),
+		Handler: engine.Handler(),
+	}
+
+	// Start server in goroutine
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			t.Errorf("Debug server listen failed: %v", err)
+		}
+	}()
+
+	// Wait for server to start by retrying connection
+	expectedAddr := fmt.Sprintf("localhost:%d", debugPort)
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout("tcp", expectedAddr, 100*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}, 5*time.Second, 100*time.Millisecond, "Debug server should be listening on %s", expectedAddr)
+
+	// Test that debug endpoints are accessible
+	url := fmt.Sprintf("http://localhost:%d/debug/config_dump/modelroutes", debugPort)
+	var resp *http.Response
+	require.Eventually(t, func() bool {
+		var err error
+		resp, err = http.Get(url)
+		if err != nil {
+			return false
+		}
+		// Close response body immediately in each attempt
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 5*time.Second, 100*time.Millisecond, "Debug endpoint should be accessible at %s", url)
+
+	// Verify response status (resp is from the last successful attempt)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Debug endpoint should return 200 OK")
+
+	// Graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Logf("Warning: Server shutdown failed: %v", err)
+	}
+
+	// Wait for server to shut down by verifying the endpoint becomes unavailable
+	require.Eventually(t, func() bool {
+		_, err := http.Get(url)
+		return err != nil // Server should be closed, so connection should fail
+	}, 2*time.Second, 50*time.Millisecond, "Debug server should shut down after shutdown")
 }
