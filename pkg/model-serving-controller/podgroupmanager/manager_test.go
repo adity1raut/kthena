@@ -14,14 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package gangscheduling
+package podgroupmanager
 
 import (
 	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
+	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -87,19 +89,32 @@ func TestCalculateRequirements(t *testing.T) {
 
 	t.Run("basic calculation", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		mi := createBasicModelServing()
+		manager.hasPodGroupCRD.Store(true)
+		manager.hasSubGroupPolicy.Store(true)
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
 
 		// For 2 prefill roles (each with 1 entry + 3 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+3)*2 + (1+2)*1 = 8 + 3 = 11
 		assert.Equal(t, 11, minMember)
 
 		// Check task members
-		expectedTaskMembers := map[string]int32{
+		expectedRoleMembers := map[string]int32{
+			"prefill": 4, // 1 entry + 3 workers
+			"decode":  3, // 1 entry + 2 workers
+		}
+		assert.Equal(t, expectedRoleMembers, minRoleMember)
+		expectedTaskMembers := map[string]int32{}
+		assert.Equal(t, expectedTaskMembers, minTaskMember)
+
+		manager.hasSubGroupPolicy.Store(false)
+		_, _, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		expectedTaskMembers = map[string]int32{
 			"prefill-0": 4, // 1 entry + 3 workers
 			"prefill-1": 4, // 1 entry + 3 workers
 			"decode-0":  3, // 1 entry + 2 workers
@@ -121,8 +136,11 @@ func TestCalculateRequirements(t *testing.T) {
 
 	t.Run("with MinRoleReplicas constraint", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		mi := createBasicModelServing()
+		manager.hasPodGroupCRD.Store(true)
+		manager.hasSubGroupPolicy.Store(true)
 
 		// Set MinRoleReplicas to limit the number of roles considered
 		minRoleReplicas := map[string]int32{
@@ -133,14 +151,24 @@ func TestCalculateRequirements(t *testing.T) {
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
 
 		// For 1 prefill role (1 entry + 3 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+3)*1 + (1+2)*1 = 4 + 3 = 7
 		assert.Equal(t, 7, minMember)
 
 		// Check task members - should only include prefill-0 and decode-0
-		expectedTaskMembers := map[string]int32{
+		expectedRoleMembers := map[string]int32{
+			"prefill": 4, // 1 entry + 3 workers
+			"decode":  3, // 1 entry + 2 workers
+		}
+		assert.Equal(t, expectedRoleMembers, minRoleMember)
+		expectedTaskMembers := map[string]int32{}
+		assert.Equal(t, expectedTaskMembers, minTaskMember)
+
+		manager.hasSubGroupPolicy.Store(false)
+		_, _, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		expectedTaskMembers = map[string]int32{
 			"prefill-0": 4, // 1 entry + 3 workers
 			"decode-0":  3, // 1 entry + 2 workers
 		}
@@ -161,13 +189,16 @@ func TestCalculateRequirements(t *testing.T) {
 
 	t.Run("nil MinRoleReplicas", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		mi := createBasicModelServing()
 		mi.Spec.Template.GangPolicy.MinRoleReplicas = nil
+		manager.hasPodGroupCRD.Store(true)
+		manager.hasSubGroupPolicy.Store(true)
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, _, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, _, _, _ := manager.calculateRequirements(mi, "test-serving-group")
 
 		// Should consider all roles without constraint
 		// Same as basic calculation: 11 pods
@@ -176,38 +207,55 @@ func TestCalculateRequirements(t *testing.T) {
 
 	t.Run("empty roles", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		mi := createBasicModelServing()
 		mi.Spec.Template.Roles = []workloadv1alpha1.Role{} // Empty roles
+		manager.hasPodGroupCRD.Store(true)
+		manager.hasSubGroupPolicy.Store(true)
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, minResources := manager.calculateRequirements(mi, "test-serving-group")
 
 		// Should have no requirements
 		assert.Equal(t, 0, minMember)
+		assert.Empty(t, minRoleMember)
 		assert.Empty(t, minTaskMember)
 		assert.Empty(t, minResources)
 	})
 
 	t.Run("role with no worker template", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		mi := createBasicModelServing()
+		manager.hasPodGroupCRD.Store(true)
+		manager.hasSubGroupPolicy.Store(true)
 
 		// Modify one role to have no worker template
 		mi.Spec.Template.Roles[1].WorkerTemplate = nil
 		mi.Spec.Template.Roles[1].WorkerReplicas = 0
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
 
 		// For 2 prefill roles (each with 1 entry + 3 workers) and 1 decode role (1 entry only)
 		// Total pods = (1+3)*2 + (1+0)*1 = 8 + 1 = 9
 		assert.Equal(t, 9, minMember)
 
 		// Check task members
-		expectedTaskMembers := map[string]int32{
+		expectedRoleMembers := map[string]int32{
+			"prefill": 4, // 1 entry + 3 workers
+			"decode":  1, // 1 entry only (no workers)
+		}
+		assert.Equal(t, expectedRoleMembers, minRoleMember)
+		expectedTaskMembers := map[string]int32{}
+		assert.Equal(t, expectedTaskMembers, minTaskMember)
+
+		manager.hasSubGroupPolicy.Store(false)
+		_, _, minTaskMember, _ = manager.calculateRequirements(mi, "test-serving-group")
+		expectedTaskMembers = map[string]int32{
 			"prefill-0": 4, // 1 entry + 3 workers
 			"prefill-1": 4, // 1 entry + 3 workers
 			"decode-0":  1, // 1 entry only (no workers)
@@ -217,22 +265,35 @@ func TestCalculateRequirements(t *testing.T) {
 
 	t.Run("zero worker replicas", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		mi := createBasicModelServing()
+		manager.hasPodGroupCRD.Store(true)
+		manager.hasSubGroupPolicy.Store(true)
 
 		// Set worker replicas to zero for one role
 		mi.Spec.Template.Roles[0].WorkerReplicas = 0
 
 		// servingGroupName is used to find roleList.
 		// It will not affect the calculation of minTaskMember.
-		minMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
+		minMember, minRoleMember, minTaskMember, _ := manager.calculateRequirements(mi, "test-serving-group")
 
 		// For 2 prefill roles (each with 1 entry + 0 workers) and 1 decode role (1 entry + 2 workers)
 		// Total pods = (1+0)*2 + (1+2)*1 = 2 + 3 = 5
 		assert.Equal(t, 5, minMember)
 
 		// Check task members
-		expectedTaskMembers := map[string]int32{
+		expectedRoleMembers := map[string]int32{
+			"prefill": 1, // 1 entry only (no workers)
+			"decode":  3, // 1 entry + 2 workers
+		}
+		assert.Equal(t, expectedRoleMembers, minRoleMember)
+		expectedTaskMembers := map[string]int32{}
+		assert.Equal(t, expectedTaskMembers, minTaskMember)
+
+		manager.hasSubGroupPolicy.Store(false)
+		_, _, minTaskMember, _ = manager.calculateRequirements(mi, "test-serving-group")
+		expectedTaskMembers = map[string]int32{
 			"prefill-0": 1, // 1 entry only (no workers)
 			"prefill-1": 1, // 1 entry only (no workers)
 			"decode-0":  3, // 1 entry + 2 workers
@@ -244,7 +305,8 @@ func TestCalculateRequirements(t *testing.T) {
 func TestAggregateResources(t *testing.T) {
 	t.Run("basic aggregation", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -270,7 +332,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		expectedCPU := resource.MustParse("3")
 		expectedMemory := resource.MustParse("3Gi")
@@ -281,7 +343,8 @@ func TestAggregateResources(t *testing.T) {
 
 	t.Run("nil total resource list", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		var total corev1.ResourceList = nil
 
 		podSpec := &corev1.PodSpec{
@@ -297,7 +360,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		assert.NotNil(t, total)
 		assert.Len(t, total, 1)
@@ -306,35 +369,38 @@ func TestAggregateResources(t *testing.T) {
 
 	t.Run("empty containers", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
 			Containers: []corev1.Container{}, // Empty containers
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
 
 	t.Run("nil containers", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
 			Containers: nil, // Nil containers
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
 
 	t.Run("container with no resources", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -346,14 +412,15 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
 
 	t.Run("container with empty resources", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -367,14 +434,15 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		assert.Empty(t, total)
 	})
 
 	t.Run("multiple calls to aggregate resources", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec1 := &corev1.PodSpec{
@@ -404,17 +472,18 @@ func TestAggregateResources(t *testing.T) {
 		}
 
 		// First call
-		manager.aggregateResources(&total, podSpec1)
+		total = manager.aggregateResources(total, podSpec1, 1)
 		assert.True(t, resource.MustParse("1").Equal(total[corev1.ResourceCPU]))
 
 		// Second call
-		manager.aggregateResources(&total, podSpec2)
+		total = manager.aggregateResources(total, podSpec2, 1)
 		assert.True(t, resource.MustParse("3").Equal(total[corev1.ResourceCPU]))
 	})
 
 	t.Run("different resource types", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{}
 
 		podSpec := &corev1.PodSpec{
@@ -432,7 +501,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		assert.Len(t, total, 3)
 		assert.True(t, resource.MustParse("1").Equal(total[corev1.ResourceCPU]))
@@ -442,7 +511,8 @@ func TestAggregateResources(t *testing.T) {
 
 	t.Run("existing resources get updated", func(t *testing.T) {
 		store := datastore.New()
-		manager := NewManager(nil, nil, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, nil, apiextfake, store)
 		total := corev1.ResourceList{
 			corev1.ResourceCPU: resource.MustParse("1"),
 		}
@@ -460,7 +530,7 @@ func TestAggregateResources(t *testing.T) {
 			},
 		}
 
-		manager.aggregateResources(&total, podSpec)
+		total = manager.aggregateResources(total, podSpec, 1)
 
 		// Should have 1+2=3 CPUs
 		assert.True(t, resource.MustParse("3").Equal(total[corev1.ResourceCPU]))
@@ -520,7 +590,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 		// Create fake volcano client with test data
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroup2, podGroup3, podGroupDifferentNamespace)
 		store := datastore.New()
-		manager := NewManager(nil, fakeVolcanoClient, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -545,7 +616,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 		// Create fake volcano client with only unrelated pod groups
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup3)
 		store := datastore.New()
-		manager := NewManager(nil, fakeVolcanoClient, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -559,7 +631,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 		// Create fake volcano client with no pod groups
 		fakeVolcanoClient := volcanofake.NewSimpleClientset()
 		store := datastore.New()
-		manager := NewManager(nil, fakeVolcanoClient, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -573,7 +646,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 		// Create fake volcano client with pod groups
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1, podGroupDifferentNamespace)
 		store := datastore.New()
-		manager := NewManager(nil, fakeVolcanoClient, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store)
 
 		result, err := manager.getExistingPodGroups(context.Background(), modelServing)
 
@@ -588,7 +662,8 @@ func TestGetExistingPodGroups(t *testing.T) {
 	t.Run("nil model Serving parameter", func(t *testing.T) {
 		fakeVolcanoClient := volcanofake.NewSimpleClientset(podGroup1)
 		store := datastore.New()
-		manager := NewManager(nil, fakeVolcanoClient, store)
+		apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+		manager := NewManager(nil, fakeVolcanoClient, apiextfake, store)
 
 		// Test with nil ModelServing - this would cause a panic in the real code
 		// but we're checking that our test handles it gracefully
@@ -622,9 +697,9 @@ func TestHasPodGroupChanged(t *testing.T) {
 							Mode:               "sub-test-mode",
 							HighestTierAllowed: &subgroupHighestTierAllowed,
 						},
-						MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-							{LabelKey: workloadv1alpha1.RoleLabelKey},
-							{LabelKey: workloadv1alpha1.RoleIDKey},
+						MatchLabelKeys: []string{
+							workloadv1alpha1.RoleLabelKey,
+							workloadv1alpha1.RoleIDKey,
 						},
 					},
 				},
@@ -647,24 +722,6 @@ func TestHasPodGroupChanged(t *testing.T) {
 
 		result := hasPodGroupChanged(current, updated)
 		assert.True(t, result, "Expected change when MinMember differs")
-	})
-
-	t.Run("MinTaskMemberChanged", func(t *testing.T) {
-		current := basePodGroup()
-		updated := basePodGroup()
-		updated.Spec.MinTaskMember["task1"] = 2
-
-		result := hasPodGroupChanged(current, updated)
-		assert.True(t, result, "Expected change when MinTaskMember differs")
-	})
-
-	t.Run("MinTaskMemberAdded", func(t *testing.T) {
-		current := basePodGroup()
-		updated := basePodGroup()
-		updated.Spec.MinTaskMember["task3"] = 1
-
-		result := hasPodGroupChanged(current, updated)
-		assert.True(t, result, "Expected change when MinTaskMember has additional entry")
 	})
 
 	t.Run("MinResourcesChanged", func(t *testing.T) {
@@ -735,41 +792,25 @@ func TestHasPodGroupChanged(t *testing.T) {
 		result := hasPodGroupChanged(current, updated)
 		assert.False(t, result, "Expected no change when all fields are nil/empty")
 	})
-
-	t.Run("EmptyVsNilMinTaskMember", func(t *testing.T) {
-		current := &schedulingv1beta1.PodGroup{
-			Spec: schedulingv1beta1.PodGroupSpec{
-				MinTaskMember: map[string]int32{},
-			},
-		}
-		updated := &schedulingv1beta1.PodGroup{
-			Spec: schedulingv1beta1.PodGroupSpec{
-				MinTaskMember: nil,
-			},
-		}
-
-		result := hasPodGroupChanged(current, updated)
-		assert.True(t, result, "Expected change when MinTaskMember changes from empty map to nil")
-	})
 }
 
-func TestNeedHandledRoleNameList(t *testing.T) {
+func TestCalculateRequiredRoleNames(t *testing.T) {
 	tests := []struct {
 		name             string
 		expectedReplicas int
 		existRoleList    []datastore.Role
 		roleName         string
-		expectedResult   []string
+		expectedResult   []datastore.Role
 	}{
 		{
 			name:             "scale up from zero",
 			expectedReplicas: 3,
 			existRoleList:    []datastore.Role{},
 			roleName:         "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 0),
-				utils.GenerateRoleID("test-role", 1),
-				utils.GenerateRoleID("test-role", 2),
+			expectedResult: []datastore.Role{
+				{Name: utils.GenerateRoleID("test-role", 0)},
+				{Name: utils.GenerateRoleID("test-role", 1)},
+				{Name: utils.GenerateRoleID("test-role", 2)},
 			},
 		},
 		{
@@ -780,12 +821,12 @@ func TestNeedHandledRoleNameList(t *testing.T) {
 				{Name: utils.GenerateRoleID("test-role", 1)},
 			},
 			roleName: "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 0),
-				utils.GenerateRoleID("test-role", 1),
-				utils.GenerateRoleID("test-role", 2),
-				utils.GenerateRoleID("test-role", 3),
-				utils.GenerateRoleID("test-role", 4),
+			expectedResult: []datastore.Role{
+				{Name: utils.GenerateRoleID("test-role", 0)},
+				{Name: utils.GenerateRoleID("test-role", 1)},
+				{Name: utils.GenerateRoleID("test-role", 2)},
+				{Name: utils.GenerateRoleID("test-role", 3)},
+				{Name: utils.GenerateRoleID("test-role", 4)},
 			},
 		},
 		{
@@ -796,11 +837,11 @@ func TestNeedHandledRoleNameList(t *testing.T) {
 				{Name: utils.GenerateRoleID("test-role", 2)},
 			},
 			roleName: "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 0),
-				utils.GenerateRoleID("test-role", 2),
-				utils.GenerateRoleID("test-role", 3),
-				utils.GenerateRoleID("test-role", 4),
+			expectedResult: []datastore.Role{
+				{Name: utils.GenerateRoleID("test-role", 0)},
+				{Name: utils.GenerateRoleID("test-role", 2)},
+				{Name: utils.GenerateRoleID("test-role", 3)},
+				{Name: utils.GenerateRoleID("test-role", 4)},
 			},
 		},
 		{
@@ -811,238 +852,268 @@ func TestNeedHandledRoleNameList(t *testing.T) {
 				{Name: utils.GenerateRoleID("test-role", 11)},
 			},
 			roleName: "test-role",
-			expectedResult: []string{
-				utils.GenerateRoleID("test-role", 10),
-				utils.GenerateRoleID("test-role", 11),
-				utils.GenerateRoleID("test-role", 12),
+			expectedResult: []datastore.Role{
+				{Name: utils.GenerateRoleID("test-role", 10)},
+				{Name: utils.GenerateRoleID("test-role", 11)},
+				{Name: utils.GenerateRoleID("test-role", 12)},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := needHandledRoleNameList(tt.expectedReplicas, tt.existRoleList, tt.roleName)
+			result := calculateRequiredRoleNames(tt.expectedReplicas, tt.existRoleList, tt.roleName)
 			assert.Equal(t, tt.expectedResult, result)
 		})
 	}
 }
 
-func TestNeededHandledPodGroupNameList(t *testing.T) {
-	testModelServing := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-model",
-			Namespace: "default",
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: ptr.To(int32(3)),
-		},
-	}
-
+func TestAppendSubGroupPolicy(t *testing.T) {
+	// Test cases for appendSubGroupPolicy function
 	tests := []struct {
-		name             string
-		expectedReplicas int
-		modelServing     *workloadv1alpha1.ModelServing
-		servingGroupList []datastore.ServingGroup
-		expectedResult   []string
+		name           string
+		modelServing   *workloadv1alpha1.ModelServing
+		podGroup       *schedulingv1beta1.PodGroup
+		minRoleMember  map[string]int32
+		expectedResult *schedulingv1beta1.PodGroup
 	}{
 		{
-			name:             "scale down scenario - more existing groups than expected",
-			expectedReplicas: 2,
-			modelServing:     testModelServing,
-			servingGroupList: []datastore.ServingGroup{
-				{Name: utils.GenerateServingGroupName("test-model", 0)},
-				{Name: utils.GenerateServingGroupName("test-model", 1)},
-				{Name: utils.GenerateServingGroupName("test-model", 2)},
-				{Name: utils.GenerateServingGroupName("test-model", 3)},
+			name: "Basic sub group policy creation",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "role1",
+								Replicas: ptr.To(int32(3)),
+							},
+						},
+						GangPolicy: &workloadv1alpha1.GangPolicy{
+							MinRoleReplicas: map[string]int32{
+								"role1": 2,
+							},
+						},
+					},
+				},
 			},
-			expectedResult: []string{
-				utils.GenerateServingGroupName("test-model", 0),
-				utils.GenerateServingGroupName("test-model", 1),
-				utils.GenerateServingGroupName("test-model", 2),
-				utils.GenerateServingGroupName("test-model", 3),
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
 			},
-		},
-		{
-			name:             "scale up scenario - fewer existing groups than expected",
-			expectedReplicas: 4,
-			modelServing:     testModelServing,
-			servingGroupList: []datastore.ServingGroup{
-				{Name: utils.GenerateServingGroupName("test-model", 0)},
-				{Name: utils.GenerateServingGroupName("test-model", 1)},
+			minRoleMember: map[string]int32{
+				"role1": 2,
 			},
-			expectedResult: []string{
-				utils.GenerateServingGroupName("test-model", 0),
-				utils.GenerateServingGroupName("test-model", 1),
-				utils.GenerateServingGroupName("test-model", 2),
-				utils.GenerateServingGroupName("test-model", 3),
-			},
-		},
-		{
-			name:             "equal scenario - existing groups equal to expected",
-			expectedReplicas: 3,
-			modelServing:     testModelServing,
-			servingGroupList: []datastore.ServingGroup{
-				{Name: utils.GenerateServingGroupName("test-model", 0)},
-				{Name: utils.GenerateServingGroupName("test-model", 1)},
-				{Name: utils.GenerateServingGroupName("test-model", 2)},
-			},
-			expectedResult: []string{
-				utils.GenerateServingGroupName("test-model", 0),
-				utils.GenerateServingGroupName("test-model", 1),
-				utils.GenerateServingGroupName("test-model", 2),
-			},
-		},
-		{
-			name:             "empty serving group list - pure scale up",
-			expectedReplicas: 3,
-			modelServing:     testModelServing,
-			servingGroupList: []datastore.ServingGroup{},
-			expectedResult: []string{
-				utils.GenerateServingGroupName("test-model", 0),
-				utils.GenerateServingGroupName("test-model", 1),
-				utils.GenerateServingGroupName("test-model", 2),
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "role1",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role1",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+						},
+					},
+				},
 			},
 		},
 		{
-			name:             "gap in indices",
-			expectedReplicas: 5,
-			modelServing:     testModelServing,
-			servingGroupList: []datastore.ServingGroup{
-				{Name: utils.GenerateServingGroupName("test-model", 0)},
-				{Name: utils.GenerateServingGroupName("test-model", 2)},
-				{Name: utils.GenerateServingGroupName("test-model", 4)},
+			name: "Multiple roles with network topology",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "role1",
+								Replicas: ptr.To(int32(3)),
+							},
+							{
+								Name:     "role2",
+								Replicas: ptr.To(int32(2)),
+							},
+						},
+						GangPolicy: &workloadv1alpha1.GangPolicy{
+							MinRoleReplicas: map[string]int32{
+								"role1": 2,
+								"role2": 1,
+							},
+						},
+						NetworkTopology: &workloadv1alpha1.NetworkTopology{
+							RolePolicy: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:               "soft",
+								HighestTierAllowed: ptr.To(2),
+							},
+						},
+					},
+				},
 			},
-			expectedResult: []string{
-				utils.GenerateServingGroupName("test-model", 0),
-				utils.GenerateServingGroupName("test-model", 2),
-				utils.GenerateServingGroupName("test-model", 4),
-				utils.GenerateServingGroupName("test-model", 5),
-				utils.GenerateServingGroupName("test-model", 6),
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
+			},
+			minRoleMember: map[string]int32{
+				"role1": 2,
+				"role2": 1,
+			},
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "role1",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role1",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+							NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:               "soft",
+								HighestTierAllowed: ptr.To(2),
+							},
+						},
+						{
+							Name: "role2",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role2",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(1)),
+							MinSubGroups:   ptr.To(int32(1)),
+							NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
+								Mode:               "soft",
+								HighestTierAllowed: ptr.To(2),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "No network topology",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "role1",
+								Replicas: ptr.To(int32(3)),
+							},
+						},
+						GangPolicy: &workloadv1alpha1.GangPolicy{
+							MinRoleReplicas: map[string]int32{
+								"role1": 2,
+							},
+						},
+					},
+				},
+			},
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
+			},
+			minRoleMember: map[string]int32{
+				"role1": 2,
+			},
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "role1",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role1",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(2)),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "No GangPolicy MinRoleReplicas",
+			modelServing: &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-model-serving",
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "role1",
+								Replicas: ptr.To(int32(3)),
+							},
+						},
+						GangPolicy: &workloadv1alpha1.GangPolicy{
+							MinRoleReplicas: map[string]int32{},
+						},
+					},
+				},
+			},
+			podGroup: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{},
+			},
+			minRoleMember: map[string]int32{
+				"role1": 2,
+			},
+			expectedResult: &schedulingv1beta1.PodGroup{
+				Spec: schedulingv1beta1.PodGroupSpec{
+					SubGroupPolicy: []schedulingv1beta1.SubGroupPolicySpec{
+						{
+							Name: "role1",
+							LabelSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									workloadv1alpha1.ModelServingNameLabelKey: "test-model-serving",
+									workloadv1alpha1.RoleLabelKey:             "role1",
+								},
+							},
+							MatchLabelKeys: []string{workloadv1alpha1.RoleIDKey},
+							SubGroupSize:   ptr.To(int32(2)),
+							MinSubGroups:   ptr.To(int32(3)),
+						},
+					},
+				},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := neededHandledPodGroupNameList(tt.expectedReplicas, tt.modelServing, tt.servingGroupList)
-			assert.Equal(t, tt.expectedResult, result)
+			result := appendSubGroupPolicy(tt.modelServing, tt.podGroup, tt.minRoleMember)
+
+			// Compare the result with expected result
+			assert.Equal(t, len(tt.expectedResult.Spec.SubGroupPolicy), len(result.Spec.SubGroupPolicy))
+
+			for i, expectedSubGroup := range tt.expectedResult.Spec.SubGroupPolicy {
+				actualSubGroup := result.Spec.SubGroupPolicy[i]
+
+				assert.Equal(t, expectedSubGroup.Name, actualSubGroup.Name)
+				assert.Equal(t, expectedSubGroup.LabelSelector, actualSubGroup.LabelSelector)
+				assert.Equal(t, expectedSubGroup.MatchLabelKeys, actualSubGroup.MatchLabelKeys)
+				assert.Equal(t, expectedSubGroup.SubGroupSize, actualSubGroup.SubGroupSize)
+				assert.Equal(t, expectedSubGroup.MinSubGroups, actualSubGroup.MinSubGroups)
+				assert.Equal(t, expectedSubGroup.NetworkTopology, actualSubGroup.NetworkTopology)
+			}
 		})
 	}
-}
-
-func TestEqualSubGroupNetworkTopology(t *testing.T) {
-	// test case 1: both parameters are nil or empty
-	t.Run("both nil or empty", func(t *testing.T) {
-		assert.True(t, equalSubGroupNetworkTopology(nil, nil))
-		assert.True(t, equalSubGroupNetworkTopology([]schedulingv1beta1.SubGroupPolicySpec{}, nil))
-	})
-
-	// test case 2: one parameter is nil or empty, the other is not
-	t.Run("one nil or empty, other not", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(nil, subGroupPolicy))
-		assert.False(t, equalSubGroupNetworkTopology([]schedulingv1beta1.SubGroupPolicySpec{}, subGroupPolicy))
-	})
-
-	// test case 3: MatchPolicy is nil
-	t.Run("match policy is nil", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "hard",
-					HighestTierAllowed: &highestTierAllowed,
-				},
-				MatchPolicy: nil,
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
-
-	// test case 4: MatchPolicy labels mismatch
-	t.Run("match policy labels mismatch", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "hard",
-					HighestTierAllowed: &highestTierAllowed,
-				},
-				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-					{
-						LabelKey: "wrong-label-key-1",
-					},
-					{
-						LabelKey: "wrong-label-key-2",
-					},
-				},
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
-
-	// test case 5: NetworkTopology mismatch
-	t.Run("network topology mismatch", func(t *testing.T) {
-		highestTierAllowed1 := 1
-		highestTierAllowed2 := 2
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "soft",
-					HighestTierAllowed: &highestTierAllowed2,
-				},
-				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-					{
-						LabelKey: workloadv1alpha1.RoleLabelKey,
-					},
-					{
-						LabelKey: workloadv1alpha1.RoleIDKey,
-					},
-				},
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed1,
-		}
-		assert.False(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
-
-	// test case 6: complete match
-	t.Run("complete match", func(t *testing.T) {
-		highestTierAllowed := 1
-		subGroupPolicy := []schedulingv1beta1.SubGroupPolicySpec{
-			{
-				NetworkTopology: &schedulingv1beta1.NetworkTopologySpec{
-					Mode:               "hard",
-					HighestTierAllowed: &highestTierAllowed,
-				},
-				MatchPolicy: []schedulingv1beta1.MatchPolicySpec{
-					{
-						LabelKey: workloadv1alpha1.RoleLabelKey,
-					},
-					{
-						LabelKey: workloadv1alpha1.RoleIDKey,
-					},
-				},
-			},
-		}
-		networkTopology := &schedulingv1beta1.NetworkTopologySpec{
-			Mode:               "hard",
-			HighestTierAllowed: &highestTierAllowed,
-		}
-		assert.True(t, equalSubGroupNetworkTopology(subGroupPolicy, networkTopology))
-	})
 }

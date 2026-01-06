@@ -20,7 +20,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
+	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
@@ -732,13 +734,14 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kthenaClient := kthenafake.NewSimpleClientset()
 	volcanoClient := volcanofake.NewSimpleClientset()
+	apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 
 	// Create informer factories
 	kubeInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create controller
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 	assert.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -1653,9 +1656,10 @@ func TestScaleUpServingGroups(t *testing.T) {
 			kubeClient := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
 
 			// Create controller without running it to avoid background sync interference
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
 			// Create a unique ModelServing for this test
@@ -1804,9 +1808,10 @@ func TestScaleUpRoles(t *testing.T) {
 			kubeClient := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
 
 			// Create controller without running it to avoid background sync interference
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
 			// Create a unique ModelServing for this test
@@ -1936,8 +1941,9 @@ func TestScaleDownServingGroups(t *testing.T) {
 			kubeClient := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
 			miName := fmt.Sprintf("test-scaledown-%d", idx)
@@ -2052,8 +2058,9 @@ func TestScaleDownRoles(t *testing.T) {
 			kubeClient := kubefake.NewSimpleClientset()
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
+			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
 			miName := fmt.Sprintf("test-role-scaledown-%d", idx)
