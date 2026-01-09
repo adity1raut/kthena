@@ -476,7 +476,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		windowResetBuffer      = 10 * time.Second
 		inputTokenLimit        = 30
 		outputTokenLimit       = 100
-		tokensPerRequest = 10
+		tokensPerRequest       = 10
 	)
 
 	ctx := context.Background()
@@ -509,10 +509,10 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		return mr != nil
 	}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 	t.Log("ModelRoute created, waiting for rate limit window to be fresh...")
-	
+
 	// Wait for a full rate limit window to ensure we start with a clean slate
 	time.Sleep((rateLimitWindowSeconds * time.Second) + windowResetBuffer)
-	
+
 	standardMessage := []utils.ChatMessage{
 		utils.NewChatMessage("user", "hello world"),
 	}
@@ -524,7 +524,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		// Calculate expected successful requests
 		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
 		if expectedSuccessfulRequests == 0 {
-			t.Fatalf("Invalid test configuration: inputTokenLimit (%d) / tokensPerRequest (%d) = 0", 
+			t.Fatalf("Invalid test configuration: inputTokenLimit (%d) / tokensPerRequest (%d) = 0",
 				inputTokenLimit, tokensPerRequest)
 		}
 
@@ -536,7 +536,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 
 			require.NoError(t, readErr, "Failed to read response body on request %d", i+1)
 			require.Equal(t, http.StatusOK, resp.StatusCode,
-				"Request %d should succeed (consumed ~%d/%d tokens). Response: %s", 
+				"Request %d should succeed (consumed ~%d/%d tokens). Response: %s",
 				i+1, (i+1)*tokensPerRequest, inputTokenLimit, string(responseBody))
 			t.Logf("Request %d succeeded (consumed ~%d/%d tokens)", i+1, (i+1)*tokensPerRequest, inputTokenLimit)
 		}
