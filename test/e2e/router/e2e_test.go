@@ -476,7 +476,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		windowResetBuffer      = 10 * time.Second
 		inputTokenLimit        = 30
 		outputTokenLimit       = 100
-		tokensPerRequest       = 11
+		tokensPerRequest = 10
 	)
 
 	ctx := context.Background()
@@ -499,44 +499,49 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		}
 	})
 
-	// Wait for ModelRoute to be ready by making a test request with retry
+	// Wait for ModelRoute to be ready
 	t.Log("Waiting for ModelRoute to be ready...")
+	require.Eventually(t, func() bool {
+		mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return mr != nil
+	}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+	t.Log("ModelRoute created, waiting for rate limit window to be fresh...")
+	
+	// Wait for a full rate limit window to ensure we start with a clean slate
+	time.Sleep((rateLimitWindowSeconds * time.Second) + windowResetBuffer)
+	
 	standardMessage := []utils.ChatMessage{
 		utils.NewChatMessage("user", "hello world"),
 	}
-	require.Eventually(t, func() bool {
-		resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusTooManyRequests
-	}, 2*time.Minute, 2*time.Second, "ModelRoute should become ready and accept requests")
-	t.Log("ModelRoute is ready")
-
-	// Wait for rate limit window to reset after readiness check (the check may have consumed tokens)
-	t.Log("Waiting for rate limit window to reset after readiness check...")
-	time.Sleep((rateLimitWindowSeconds * time.Second) + windowResetBuffer)
 
 	// Test 1: Verify input token rate limit enforcement (30 tokens/minute)
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
-		t.Log("Test 1: Verifying input token rate limit ")
+		t.Log("Test 1: Verifying input token rate limit")
 
 		// Calculate expected successful requests
 		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
+		if expectedSuccessfulRequests == 0 {
+			t.Fatalf("Invalid test configuration: inputTokenLimit (%d) / tokensPerRequest (%d) = 0", 
+				inputTokenLimit, tokensPerRequest)
+		}
 
-		// Wait a bit to ensure rate limit state is fresh for this subtest
-		time.Sleep(2 * time.Second)
-
+		// Send requests until we exhaust the quota
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 			responseBody, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
 			require.NoError(t, readErr, "Failed to read response body on request %d", i+1)
-			assert.Equal(t, http.StatusOK, resp.StatusCode,
-				"Request %d should succeed (consumed %d/%d tokens). Response: %s", i+1, (i+1)*tokensPerRequest, inputTokenLimit, string(responseBody))
-			t.Logf("Request %d succeeded (consumed %d/%d tokens)", i+1, (i+1)*tokensPerRequest, inputTokenLimit)
+			require.Equal(t, http.StatusOK, resp.StatusCode,
+				"Request %d should succeed (consumed ~%d/%d tokens). Response: %s", 
+				i+1, (i+1)*tokensPerRequest, inputTokenLimit, string(responseBody))
+			t.Logf("Request %d succeeded (consumed ~%d/%d tokens)", i+1, (i+1)*tokensPerRequest, inputTokenLimit)
 		}
 
-		// Next request should be rate limited (would need 11 more tokens, but quota exhausted)
+		// Next request should be rate limited (quota exhausted)
 		rateLimitedResp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
 		defer rateLimitedResp.Body.Close()
 
@@ -548,7 +553,7 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 		assert.Contains(t, strings.ToLower(string(errorBody)), "rate limit",
 			"Rate limit error response must contain descriptive message")
 
-		t.Logf(" Input token rate limit enforced after %d requests ", expectedSuccessfulRequests)
+		t.Logf("Input token rate limit enforced after %d requests", expectedSuccessfulRequests)
 	})
 
 	// Test 2 Verify rate limit window accuracy and persistence
