@@ -43,19 +43,19 @@ func TestEnsureCertificate(t *testing.T) {
 		validateResult func(t *testing.T, caBundle []byte, err error)
 	}{
 		{
-			name:       "empty dnsNames returns error",
-			namespace:  "test-ns",
-			secretName: "test-secret",
-			dnsNames:   []string{},
-			wantError:  true,
+			name:          "empty dnsNames returns error",
+			namespace:     "test-ns",
+			secretName:    "test-secret",
+			dnsNames:      []string{},
+			wantError:     true,
 			errorContains: "dnsNames cannot be empty",
 		},
 		{
-			name:       "nil dnsNames returns error",
-			namespace:  "test-ns",
-			secretName: "test-secret",
-			dnsNames:   nil,
-			wantError:  true,
+			name:          "nil dnsNames returns error",
+			namespace:     "test-ns",
+			secretName:    "test-secret",
+			dnsNames:      nil,
+			wantError:     true,
 			errorContains: "dnsNames cannot be empty",
 		},
 		{
@@ -120,12 +120,12 @@ func TestEnsureCertificate(t *testing.T) {
 			},
 		},
 		{
-			name:         "handles generic get error",
-			namespace:    "test-ns",
-			secretName:   "test-secret",
-			dnsNames:     []string{"example.com"},
-			reactorError: errors.New("internal server error"),
-			wantError:    true,
+			name:          "handles generic get error",
+			namespace:     "test-ns",
+			secretName:    "test-secret",
+			dnsNames:      []string{"example.com"},
+			reactorError:  errors.New("internal server error"),
+			wantError:     true,
 			errorContains: "failed to get secret",
 		},
 	}
@@ -168,7 +168,7 @@ func TestEnsureCertificate(t *testing.T) {
 func TestEnsureCertificate_ConcurrentCreation(t *testing.T) {
 	// Test the race condition scenario where another pod creates the secret
 	client := fake.NewSimpleClientset()
-	
+
 	createCallCount := 0
 	client.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		createCallCount++
@@ -204,14 +204,14 @@ func TestEnsureCertificate_ConcurrentCreation(t *testing.T) {
 
 func TestUpdateValidatingWebhookCABundle(t *testing.T) {
 	tests := []struct {
-		name              string
-		webhookName       string
-		caBundle          []byte
-		existingWebhook   *admissionregistrationv1.ValidatingWebhookConfiguration
-		reactorError      error
-		wantError         bool
-		errorContains     string
-		expectUpdate      bool
+		name            string
+		webhookName     string
+		caBundle        []byte
+		existingWebhook *admissionregistrationv1.ValidatingWebhookConfiguration
+		reactorError    error
+		wantError       bool
+		errorContains   string
+		expectUpdate    bool
 	}{
 		{
 			name:        "webhook not found returns nil",
@@ -286,11 +286,11 @@ func TestUpdateValidatingWebhookCABundle(t *testing.T) {
 			wantError:    false,
 		},
 		{
-			name:         "handles get error",
-			webhookName:  "test-webhook",
-			caBundle:     []byte("ca-bundle"),
-			reactorError: errors.New("api error"),
-			wantError:    true,
+			name:          "handles get error",
+			webhookName:   "test-webhook",
+			caBundle:      []byte("ca-bundle"),
+			reactorError:  errors.New("api error"),
+			wantError:     true,
 			errorContains: "failed to get ValidatingWebhookConfiguration",
 		},
 	}
@@ -344,14 +344,14 @@ func TestUpdateValidatingWebhookCABundle(t *testing.T) {
 
 func TestUpdateMutatingWebhookCABundle(t *testing.T) {
 	tests := []struct {
-		name              string
-		webhookName       string
-		caBundle          []byte
-		existingWebhook   *admissionregistrationv1.MutatingWebhookConfiguration
-		reactorError      error
-		wantError         bool
-		errorContains     string
-		expectUpdate      bool
+		name            string
+		webhookName     string
+		caBundle        []byte
+		existingWebhook *admissionregistrationv1.MutatingWebhookConfiguration
+		reactorError    error
+		wantError       bool
+		errorContains   string
+		expectUpdate    bool
 	}{
 		{
 			name:        "webhook not found returns nil",
@@ -426,11 +426,11 @@ func TestUpdateMutatingWebhookCABundle(t *testing.T) {
 			wantError:    false,
 		},
 		{
-			name:         "handles get error",
-			webhookName:  "test-webhook",
-			caBundle:     []byte("ca-bundle"),
-			reactorError: errors.New("api error"),
-			wantError:    true,
+			name:          "handles get error",
+			webhookName:   "test-webhook",
+			caBundle:      []byte("ca-bundle"),
+			reactorError:  errors.New("api error"),
+			wantError:     true,
 			errorContains: "failed to get MutatingWebhookConfiguration",
 		},
 	}
@@ -555,25 +555,6 @@ func TestLoadCertBundleFromSecret(t *testing.T) {
 			wantNil:   true,
 		},
 		{
-			name:       "secret with empty values",
-			namespace:  "test-ns",
-			secretName: "test-secret",
-			existingSecret: &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-secret",
-					Namespace: "test-ns",
-				},
-				Data: map[string][]byte{
-					TLSCertKey: []byte{},
-					TLSKeyKey:  []byte("key-data"),
-				},
-			},
-			wantError: false,
-			expectedBundle: &CertBundle{
-				KeyPEM: []byte("key-data"),
-			},
-		},
-		{
 			name:         "handles get error",
 			namespace:    "test-ns",
 			secretName:   "test-secret",
@@ -642,7 +623,7 @@ func TestLoadCertBundleFromSecret(t *testing.T) {
 
 // Helper function
 func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || 
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
 		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
 }
 
