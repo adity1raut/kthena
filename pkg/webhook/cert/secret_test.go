@@ -469,11 +469,14 @@ func TestUpdateMutatingWebhookCABundle(t *testing.T) {
 				if err != nil {
 					t.Fatalf("failed to get updated webhook: %v", err)
 				}
-				for i := range updated.Webhooks {
+				if len(updated.Webhooks) != len(tt.existingWebhook.Webhooks) {
+					t.Fatalf("expected %d webhooks after update, got %d", len(tt.existingWebhook.Webhooks), len(updated.Webhooks))
+				}
+				for i, updatedWebhook := range updated.Webhooks {
 					if len(tt.existingWebhook.Webhooks[i].ClientConfig.CABundle) == 0 {
-						if string(updated.Webhooks[i].ClientConfig.CABundle) != string(tt.caBundle) {
+						if string(updatedWebhook.ClientConfig.CABundle) != string(tt.caBundle) {
 							t.Errorf("webhook %d: expected CA bundle %q, got %q",
-								i, string(tt.caBundle), string(updated.Webhooks[i].ClientConfig.CABundle))
+								i, string(tt.caBundle), string(updatedWebhook.ClientConfig.CABundle))
 						}
 					}
 				}
