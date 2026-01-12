@@ -18,166 +18,639 @@ package cert
 
 import (
 	"context"
+	"errors"
 	"testing"
 
-	admissionv1 "k8s.io/api/admissionregistration/v1"
+	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
-func TestEnsureCertificate_CreateSecret(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	ctx := context.Background()
-
-	ca, err := EnsureCertificate(
-		ctx,
-		client,
-		"default",
-		"test-secret",
-		[]string{"webhook.default.svc"},
-	)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestEnsureCertificate(t *testing.T) {
+	tests := []struct {
+		name           string
+		namespace      string
+		secretName     string
+		dnsNames       []string
+		existingSecret *corev1.Secret
+		reactorError   error
+		wantError      bool
+		errorContains  string
+		validateResult func(t *testing.T, caBundle []byte, err error)
+	}{
+		{
+			name:       "empty dnsNames returns error",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			dnsNames:   []string{},
+			wantError:  true,
+			errorContains: "dnsNames cannot be empty",
+		},
+		{
+			name:       "nil dnsNames returns error",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			dnsNames:   nil,
+			wantError:  true,
+			errorContains: "dnsNames cannot be empty",
+		},
+		{
+			name:       "existing secret returns CA bundle",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			dnsNames:   []string{"example.com"},
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Type: corev1.SecretTypeTLS,
+				Data: map[string][]byte{
+					TLSCertKey: []byte("cert-data"),
+					TLSKeyKey:  []byte("key-data"),
+					CAKey:      []byte("ca-bundle-data"),
+				},
+			},
+			wantError: false,
+			validateResult: func(t *testing.T, caBundle []byte, err error) {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				if string(caBundle) != "ca-bundle-data" {
+					t.Errorf("expected CA bundle 'ca-bundle-data', got: %s", string(caBundle))
+				}
+			},
+		},
+		{
+			name:       "existing secret without CA key returns error",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			dnsNames:   []string{"example.com"},
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Type: corev1.SecretTypeTLS,
+				Data: map[string][]byte{
+					TLSCertKey: []byte("cert-data"),
+					TLSKeyKey:  []byte("key-data"),
+				},
+			},
+			wantError:     true,
+			errorContains: "does not contain ca.crt",
+		},
+		{
+			name:       "creates new secret when not found",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			dnsNames:   []string{"example.com", "*.example.com"},
+			wantError:  false,
+			validateResult: func(t *testing.T, caBundle []byte, err error) {
+				if err != nil {
+					t.Errorf("expected no error, got: %v", err)
+				}
+				if len(caBundle) == 0 {
+					t.Error("expected non-empty CA bundle")
+				}
+			},
+		},
+		{
+			name:         "handles generic get error",
+			namespace:    "test-ns",
+			secretName:   "test-secret",
+			dnsNames:     []string{"example.com"},
+			reactorError: errors.New("internal server error"),
+			wantError:    true,
+			errorContains: "failed to get secret",
+		},
 	}
-	if len(ca) == 0 {
-		t.Fatalf("expected CA bundle, got empty")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []runtime.Object
+			if tt.existingSecret != nil {
+				objects = append(objects, tt.existingSecret)
+			}
+
+			client := fake.NewSimpleClientset(objects...)
+
+			if tt.reactorError != nil {
+				client.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tt.reactorError
+				})
+			}
+
+			ctx := context.Background()
+			caBundle, err := EnsureCertificate(ctx, client, tt.namespace, tt.secretName, tt.dnsNames)
+
+			if tt.wantError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("expected error containing %q, got: %v", tt.errorContains, err)
+				}
+			} else if err != nil {
+				t.Errorf("expected no error, got: %v", err)
+			}
+
+			if tt.validateResult != nil {
+				tt.validateResult(t, caBundle, err)
+			}
+		})
 	}
 }
 
-func TestEnsureCertificate_ReuseExistingSecret(t *testing.T) {
+func TestEnsureCertificate_ConcurrentCreation(t *testing.T) {
+	// Test the race condition scenario where another pod creates the secret
 	client := fake.NewSimpleClientset()
+	
+	createCallCount := 0
+	client.PrependReactor("create", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		createCallCount++
+		return true, nil, apierrors.NewAlreadyExists(corev1.Resource("secrets"), "test-secret")
+	})
+
+	client.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if createCallCount > 0 {
+			// After create attempt, return the secret
+			return true, &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Data: map[string][]byte{
+					CAKey: []byte("concurrent-ca-bundle"),
+				},
+			}, nil
+		}
+		return true, nil, apierrors.NewNotFound(corev1.Resource("secrets"), "test-secret")
+	})
+
 	ctx := context.Background()
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "existing-secret",
-			Namespace: "default",
-		},
-		Data: map[string][]byte{
-			CAKey: []byte("test-ca"),
-		},
-	}
-
-	if _, err := client.CoreV1().Secrets("default").Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-		t.Fatalf("failed to create secret for test: %v", err)
-	}
-	ca, err := EnsureCertificate(
-		ctx,
-		client,
-		"default",
-		"existing-secret",
-		[]string{"webhook.default.svc"},
-	)
+	caBundle, err := EnsureCertificate(ctx, client, "test-ns", "test-secret", []string{"example.com"})
 
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Errorf("expected no error, got: %v", err)
 	}
-	if string(ca) != "test-ca" {
-		t.Fatalf("expected existing CA bundle")
+	if string(caBundle) != "concurrent-ca-bundle" {
+		t.Errorf("expected CA bundle 'concurrent-ca-bundle', got: %s", string(caBundle))
 	}
 }
 
 func TestUpdateValidatingWebhookCABundle(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	ctx := context.Background()
-
-	vwc := &admissionv1.ValidatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-validating",
+	tests := []struct {
+		name              string
+		webhookName       string
+		caBundle          []byte
+		existingWebhook   *admissionregistrationv1.ValidatingWebhookConfiguration
+		reactorError      error
+		wantError         bool
+		errorContains     string
+		expectUpdate      bool
+	}{
+		{
+			name:        "webhook not found returns nil",
+			webhookName: "test-webhook",
+			caBundle:    []byte("ca-bundle"),
+			wantError:   false,
 		},
-		Webhooks: []admissionv1.ValidatingWebhook{
-			{
-				Name: "vhook.test",
-				ClientConfig: admissionv1.WebhookClientConfig{
-					CABundle: nil,
+		{
+			name:        "updates webhook with empty CA bundle",
+			webhookName: "test-webhook",
+			caBundle:    []byte("new-ca-bundle"),
+			existingWebhook: &admissionregistrationv1.ValidatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-webhook",
+				},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{
+					{
+						Name: "webhook1.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte{},
+						},
+					},
 				},
 			},
+			expectUpdate: true,
+			wantError:    false,
+		},
+		{
+			name:        "skips update when CA bundle already present",
+			webhookName: "test-webhook",
+			caBundle:    []byte("new-ca-bundle"),
+			existingWebhook: &admissionregistrationv1.ValidatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-webhook",
+				},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{
+					{
+						Name: "webhook1.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte("existing-ca-bundle"),
+						},
+					},
+				},
+			},
+			expectUpdate: false,
+			wantError:    false,
+		},
+		{
+			name:        "updates only webhooks with empty CA bundle",
+			webhookName: "test-webhook",
+			caBundle:    []byte("new-ca-bundle"),
+			existingWebhook: &admissionregistrationv1.ValidatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-webhook",
+				},
+				Webhooks: []admissionregistrationv1.ValidatingWebhook{
+					{
+						Name: "webhook1.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte{},
+						},
+					},
+					{
+						Name: "webhook2.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte("existing-ca"),
+						},
+					},
+				},
+			},
+			expectUpdate: true,
+			wantError:    false,
+		},
+		{
+			name:         "handles get error",
+			webhookName:  "test-webhook",
+			caBundle:     []byte("ca-bundle"),
+			reactorError: errors.New("api error"),
+			wantError:    true,
+			errorContains: "failed to get ValidatingWebhookConfiguration",
 		},
 	}
 
-	_, _ = client.AdmissionregistrationV1().
-		ValidatingWebhookConfigurations().
-		Create(ctx, vwc, metav1.CreateOptions{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []runtime.Object
+			if tt.existingWebhook != nil {
+				objects = append(objects, tt.existingWebhook)
+			}
 
-	err := UpdateValidatingWebhookCABundle(ctx, client, "test-validating", []byte("ca"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			client := fake.NewSimpleClientset(objects...)
 
-	updatedVWC, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, "test-validating", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("failed to get updated validating webhook config: %v", err)
-	}
+			if tt.reactorError != nil {
+				client.PrependReactor("get", "validatingwebhookconfigurations", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tt.reactorError
+				})
+			}
 
-	if len(updatedVWC.Webhooks) == 0 {
-		t.Fatal("expected webhooks in updated config, but got none")
-	}
+			ctx := context.Background()
+			err := UpdateValidatingWebhookCABundle(ctx, client, tt.webhookName, tt.caBundle)
 
-	if string(updatedVWC.Webhooks[0].ClientConfig.CABundle) != "ca" {
-		t.Errorf("expected CA bundle to be 'ca', but got '%s'", string(updatedVWC.Webhooks[0].ClientConfig.CABundle))
+			if tt.wantError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("expected error containing %q, got: %v", tt.errorContains, err)
+				}
+			} else if err != nil {
+				t.Errorf("expected no error, got: %v", err)
+			}
+
+			if tt.expectUpdate && tt.existingWebhook != nil {
+				// Verify the webhook was updated
+				updated, err := client.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, tt.webhookName, metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("failed to get updated webhook: %v", err)
+				}
+				for i := range updated.Webhooks {
+					if len(tt.existingWebhook.Webhooks[i].ClientConfig.CABundle) == 0 {
+						if string(updated.Webhooks[i].ClientConfig.CABundle) != string(tt.caBundle) {
+							t.Errorf("webhook %d: expected CA bundle %q, got %q",
+								i, string(tt.caBundle), string(updated.Webhooks[i].ClientConfig.CABundle))
+						}
+					}
+				}
+			}
+		})
 	}
 }
 
 func TestUpdateMutatingWebhookCABundle(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	ctx := context.Background()
-
-	mwc := &admissionv1.MutatingWebhookConfiguration{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-mutating",
+	tests := []struct {
+		name              string
+		webhookName       string
+		caBundle          []byte
+		existingWebhook   *admissionregistrationv1.MutatingWebhookConfiguration
+		reactorError      error
+		wantError         bool
+		errorContains     string
+		expectUpdate      bool
+	}{
+		{
+			name:        "webhook not found returns nil",
+			webhookName: "test-webhook",
+			caBundle:    []byte("ca-bundle"),
+			wantError:   false,
 		},
-		Webhooks: []admissionv1.MutatingWebhook{
-			{
-				Name: "mhook.test",
-				ClientConfig: admissionv1.WebhookClientConfig{
-					CABundle: nil,
+		{
+			name:        "updates webhook with empty CA bundle",
+			webhookName: "test-webhook",
+			caBundle:    []byte("new-ca-bundle"),
+			existingWebhook: &admissionregistrationv1.MutatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-webhook",
+				},
+				Webhooks: []admissionregistrationv1.MutatingWebhook{
+					{
+						Name: "webhook1.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte{},
+						},
+					},
 				},
 			},
+			expectUpdate: true,
+			wantError:    false,
+		},
+		{
+			name:        "skips update when CA bundle already present",
+			webhookName: "test-webhook",
+			caBundle:    []byte("new-ca-bundle"),
+			existingWebhook: &admissionregistrationv1.MutatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-webhook",
+				},
+				Webhooks: []admissionregistrationv1.MutatingWebhook{
+					{
+						Name: "webhook1.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte("existing-ca-bundle"),
+						},
+					},
+				},
+			},
+			expectUpdate: false,
+			wantError:    false,
+		},
+		{
+			name:        "updates only webhooks with empty CA bundle",
+			webhookName: "test-webhook",
+			caBundle:    []byte("new-ca-bundle"),
+			existingWebhook: &admissionregistrationv1.MutatingWebhookConfiguration{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-webhook",
+				},
+				Webhooks: []admissionregistrationv1.MutatingWebhook{
+					{
+						Name: "webhook1.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte{},
+						},
+					},
+					{
+						Name: "webhook2.example.com",
+						ClientConfig: admissionregistrationv1.WebhookClientConfig{
+							CABundle: []byte("existing-ca"),
+						},
+					},
+				},
+			},
+			expectUpdate: true,
+			wantError:    false,
+		},
+		{
+			name:         "handles get error",
+			webhookName:  "test-webhook",
+			caBundle:     []byte("ca-bundle"),
+			reactorError: errors.New("api error"),
+			wantError:    true,
+			errorContains: "failed to get MutatingWebhookConfiguration",
 		},
 	}
 
-	_, _ = client.AdmissionregistrationV1().
-		MutatingWebhookConfigurations().
-		Create(ctx, mwc, metav1.CreateOptions{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []runtime.Object
+			if tt.existingWebhook != nil {
+				objects = append(objects, tt.existingWebhook)
+			}
 
-	err := UpdateMutatingWebhookCABundle(ctx, client, "test-mutating", []byte("ca"))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+			client := fake.NewSimpleClientset(objects...)
+
+			if tt.reactorError != nil {
+				client.PrependReactor("get", "mutatingwebhookconfigurations", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tt.reactorError
+				})
+			}
+
+			ctx := context.Background()
+			err := UpdateMutatingWebhookCABundle(ctx, client, tt.webhookName, tt.caBundle)
+
+			if tt.wantError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+					t.Errorf("expected error containing %q, got: %v", tt.errorContains, err)
+				}
+			} else if err != nil {
+				t.Errorf("expected no error, got: %v", err)
+			}
+
+			if tt.expectUpdate && tt.existingWebhook != nil {
+				// Verify the webhook was updated
+				updated, err := client.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, tt.webhookName, metav1.GetOptions{})
+				if err != nil {
+					t.Fatalf("failed to get updated webhook: %v", err)
+				}
+				for i := range updated.Webhooks {
+					if len(tt.existingWebhook.Webhooks[i].ClientConfig.CABundle) == 0 {
+						if string(updated.Webhooks[i].ClientConfig.CABundle) != string(tt.caBundle) {
+							t.Errorf("webhook %d: expected CA bundle %q, got %q",
+								i, string(tt.caBundle), string(updated.Webhooks[i].ClientConfig.CABundle))
+						}
+					}
+				}
+			}
+		})
 	}
 }
 
 func TestLoadCertBundleFromSecret(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	ctx := context.Background()
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "bundle-secret",
-			Namespace: "default",
+	tests := []struct {
+		name           string
+		namespace      string
+		secretName     string
+		existingSecret *corev1.Secret
+		reactorError   error
+		wantError      bool
+		wantNil        bool
+		expectedBundle *CertBundle
+	}{
+		{
+			name:       "secret not found returns nil",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			wantError:  false,
+			wantNil:    true,
 		},
-		Data: map[string][]byte{
-			TLSCertKey: []byte("cert"),
-			TLSKeyKey:  []byte("key"),
-			CAKey:      []byte("ca"),
+		{
+			name:       "loads complete cert bundle",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Data: map[string][]byte{
+					TLSCertKey: []byte("cert-data"),
+					TLSKeyKey:  []byte("key-data"),
+					CAKey:      []byte("ca-data"),
+				},
+			},
+			wantError: false,
+			expectedBundle: &CertBundle{
+				CertPEM: []byte("cert-data"),
+				KeyPEM:  []byte("key-data"),
+				CAPEM:   []byte("ca-data"),
+			},
+		},
+		{
+			name:       "loads partial cert bundle",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Data: map[string][]byte{
+					TLSCertKey: []byte("cert-data"),
+				},
+			},
+			wantError: false,
+			expectedBundle: &CertBundle{
+				CertPEM: []byte("cert-data"),
+			},
+		},
+		{
+			name:       "secret with nil data returns nil bundle",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Data: nil,
+			},
+			wantError: false,
+			wantNil:   true,
+		},
+		{
+			name:       "secret with empty values",
+			namespace:  "test-ns",
+			secretName: "test-secret",
+			existingSecret: &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-secret",
+					Namespace: "test-ns",
+				},
+				Data: map[string][]byte{
+					TLSCertKey: []byte{},
+					TLSKeyKey:  []byte("key-data"),
+				},
+			},
+			wantError: false,
+			expectedBundle: &CertBundle{
+				KeyPEM: []byte("key-data"),
+			},
+		},
+		{
+			name:         "handles get error",
+			namespace:    "test-ns",
+			secretName:   "test-secret",
+			reactorError: errors.New("api error"),
+			wantError:    true,
 		},
 	}
 
-	_, _ = client.CoreV1().Secrets("default").Create(ctx, secret, metav1.CreateOptions{})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []runtime.Object
+			if tt.existingSecret != nil {
+				objects = append(objects, tt.existingSecret)
+			}
 
-	bundle, err := LoadCertBundleFromSecret(ctx, client, "default", "bundle-secret")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+			client := fake.NewSimpleClientset(objects...)
 
-	if string(bundle.CertPEM) != "cert" {
-		t.Fatalf("cert mismatch")
+			if tt.reactorError != nil {
+				client.PrependReactor("get", "secrets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, tt.reactorError
+				})
+			}
+
+			ctx := context.Background()
+			bundle, err := LoadCertBundleFromSecret(ctx, client, tt.namespace, tt.secretName)
+
+			if tt.wantError {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("expected no error, got: %v", err)
+				return
+			}
+
+			if tt.wantNil {
+				if bundle != nil {
+					t.Errorf("expected nil bundle, got: %+v", bundle)
+				}
+				return
+			}
+
+			if tt.expectedBundle != nil {
+				if bundle == nil {
+					t.Fatal("expected non-nil bundle, got nil")
+				}
+				if string(bundle.CertPEM) != string(tt.expectedBundle.CertPEM) {
+					t.Errorf("CertPEM mismatch: expected %q, got %q",
+						string(tt.expectedBundle.CertPEM), string(bundle.CertPEM))
+				}
+				if string(bundle.KeyPEM) != string(tt.expectedBundle.KeyPEM) {
+					t.Errorf("KeyPEM mismatch: expected %q, got %q",
+						string(tt.expectedBundle.KeyPEM), string(bundle.KeyPEM))
+				}
+				if string(bundle.CAPEM) != string(tt.expectedBundle.CAPEM) {
+					t.Errorf("CAPEM mismatch: expected %q, got %q",
+						string(tt.expectedBundle.CAPEM), string(bundle.CAPEM))
+				}
+			}
+		})
 	}
-	if string(bundle.KeyPEM) != "key" {
-		t.Fatalf("key mismatch")
+}
+
+// Helper function
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || 
+		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
 	}
-	if string(bundle.CAPEM) != "ca" {
-		t.Fatalf("ca mismatch")
-	}
+	return false
 }
